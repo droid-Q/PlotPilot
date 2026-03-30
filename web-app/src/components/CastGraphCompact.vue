@@ -54,6 +54,7 @@ const graph = ref<{ characters: CastCharacter[]; relationships: CastRelationship
   characters: [],
   relationships: [],
 })
+let requestId = 0
 
 const emptyHint = computed(() => graph.value.characters.length === 0 && !loading.value)
 
@@ -93,15 +94,28 @@ const nodes = computed(() => graphData.value.nodes)
 const links = computed(() => graphData.value.links)
 
 const reload = async () => {
+  const currentRequestId = ++requestId
+
   loading.value = true
   try {
     const data = await bookApi.getCast(props.slug)
-    graph.value = {
-      characters: data.characters || [],
-      relationships: data.relationships || [],
+
+    // Only update if this is still the latest request
+    if (currentRequestId === requestId) {
+      graph.value = {
+        characters: data.characters || [],
+        relationships: data.relationships || [],
+      }
+    }
+  } catch (error) {
+    console.error('Failed to load cast data:', error)
+    if (currentRequestId === requestId) {
+      window.$message?.error('加载人物关系失败，请稍后重试')
     }
   } finally {
-    loading.value = false
+    if (currentRequestId === requestId) {
+      loading.value = false
+    }
   }
 }
 
