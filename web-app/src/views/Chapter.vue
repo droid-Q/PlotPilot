@@ -143,10 +143,12 @@ import { useMessage } from 'naive-ui'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { bookApi } from '../api/book'
+import { useStatsStore } from '../stores/statsStore'
 
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
+const statsStore = useStatsStore()
 
 const slug = route.params.slug as string
 const chapterId = computed(() => {
@@ -274,6 +276,8 @@ const saveContent = async () => {
     lastSaveTime.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
     updateTime.value = new Date().toLocaleString('zh-CN', { hour12: false })
     message.success('已保存')
+    // Refresh book stats after successful save
+    statsStore.onChapterSaved(slug, chapterId.value)
   } catch (error) {
     console.error('Failed to save content:', error)
     saveStatus.value = 'unsaved'
@@ -288,6 +292,8 @@ const saveReview = async () => {
   try {
     await bookApi.saveChapterReview(slug, chapterId.value, reviewStatus.value, reviewMemo.value)
     message.success('审定已保存')
+    // Refresh book stats after successful save
+    statsStore.onChapterSaved(slug, chapterId.value)
   } catch (error) {
     console.error('Failed to save review:', error)
     message.error('保存失败，请稍后重试')
