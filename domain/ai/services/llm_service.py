@@ -16,6 +16,14 @@ class GenerationConfig:
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.__post_init__()
+
+    def __post_init__(self):
+        """验证配置参数"""
+        if not (0.0 <= self.temperature <= 2.0):
+            raise ValueError("Temperature must be between 0.0 and 2.0")
+        if self.max_tokens <= 0:
+            raise ValueError("max_tokens must be greater than 0")
 
 
 class GenerationResult:
@@ -23,6 +31,12 @@ class GenerationResult:
     def __init__(self, content: str, token_usage: TokenUsage):
         self.content = content
         self.token_usage = token_usage
+        self.__post_init__()
+
+    def __post_init__(self):
+        """验证结果参数"""
+        if not self.content or not self.content.strip():
+            raise ValueError("Content cannot be empty")
 
 
 class LLMService(ABC):

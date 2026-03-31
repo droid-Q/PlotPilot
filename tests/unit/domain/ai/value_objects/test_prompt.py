@@ -19,6 +19,24 @@ def test_prompt_empty_user_raises_error():
         Prompt(system="系统消息", user="")
 
 
+def test_prompt_whitespace_only_user_raises_error():
+    """测试仅空白字符的用户消息抛出异常"""
+    with pytest.raises(ValueError):
+        Prompt(system="系统消息", user="   ")
+
+
+def test_prompt_empty_system_raises_error():
+    """测试空系统消息抛出异常"""
+    with pytest.raises(ValueError):
+        Prompt(system="", user="用户消息")
+
+
+def test_prompt_whitespace_only_system_raises_error():
+    """测试仅空白字符的系统消息抛出异常"""
+    with pytest.raises(ValueError):
+        Prompt(system="   ", user="用户消息")
+
+
 def test_prompt_to_messages():
     """测试转换为消息列表"""
     prompt = Prompt(
