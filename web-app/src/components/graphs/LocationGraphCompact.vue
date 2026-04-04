@@ -10,7 +10,7 @@
       </n-space>
     </div>
     <div v-if="emptyHint" class="lgc-empty">
-      <n-empty description="尚无地点节点，可在完整页添加" size="small" />
+      <n-empty description="尚无地点相关三元组，请在「叙事与知识」中添加" size="small" />
     </div>
     <div v-else class="lgc-canvas">
       <GraphChart :nodes="nodes" :links="links" height="100%" @node-click="handleNodeClick" />
@@ -242,28 +242,40 @@ onMounted(async () => {
 }
 
 .lgc-toolbar {
+  flex-shrink: 0;
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  padding: 10px 12px;
-  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
-  background: rgba(248, 250, 252, 0.6);
-  gap: 12px;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+  background: #fff;
 }
 
 .lgc-hint {
-  font-size: 12px;
-  line-height: 1.4;
+  font-size: 11px;
+  line-height: 1.45;
+  max-width: min(100%, 380px);
+}
+
+.lgc-hint code {
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgba(79, 70, 229, 0.08);
+  color: #4338ca;
 }
 
 .lgc-empty {
   flex: 1;
+  min-height: 500px;
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-/* 与 CastGraphCompact 一致：侧栏 flex 内 height:100% 需可解析的块高，否则 ECharts 高度为 0 不可见 */
+/* 侧栏 flex 内 height:100% 需可解析的块高，否则 ECharts 高度为 0 不可见 */
 .lgc-canvas {
   flex: 1;
   min-height: 500px;

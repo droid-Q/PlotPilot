@@ -10,7 +10,7 @@
       </n-space>
     </div>
     <div v-if="emptyHint" class="cgc-empty">
-      <n-empty description="尚无人物节点，可在完整页添加" size="small" />
+      <n-empty description="尚无人物相关三元组，请在「叙事与知识」中添加" size="small" />
     </div>
     <div v-else class="cgc-canvas">
       <GraphChart :nodes="nodes" :links="links" height="100%" @node-click="handleNodeClick" />
@@ -234,18 +234,16 @@ onMounted(async () => {
   flex: 1;
   min-height: 500px;
   width: 100%;
+  position: relative;
 }
 
+/* 勿用 absolute + 固定 top：工具栏换行后高度 >48px 会与空状态叠在一起 */
 .cgc-empty {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 48px;
-  bottom: 0;
+  flex: 1;
+  min-height: 500px;
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
-  pointer-events: none;
-  z-index: 1;
 }
 </style>
