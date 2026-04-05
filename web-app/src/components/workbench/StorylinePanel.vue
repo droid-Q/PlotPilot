@@ -11,7 +11,7 @@
         </p>
       </div>
       <n-space class="header-actions" :size="8" align="center">
-        <n-button size="small" secondary @click="showCreateModal = true">
+        <n-button size="small" secondary @click="openCreate">
           + 添加故事线
         </n-button>
         <n-button size="small" type="primary" :loading="loading" @click="loadStorylines">
@@ -66,7 +66,7 @@
     </div>
 
     <!-- 创建/编辑故事线模态框 -->
-    <n-modal v-model:show="showCreateModal" preset="card" title="添加故事线" style="width: 600px">
+    <n-modal v-model:show="showCreateModal" preset="card" :title="editingStoryline ? '编辑故事线' : '添加故事线'" style="width: 600px">
       <n-form ref="formRef" :model="formData" :rules="formRules" label-placement="left" label-width="120">
         <n-form-item label="故事线类型" path="storyline_type">
           <n-select
@@ -106,8 +106,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { useMessage } from 'naive-ui'
+import { ref, onMounted, watch } from 'vue'
+import { useMessage, useDialog } from 'naive-ui'
 import { workflowApi } from '../../api/workflow'
 import type { StorylineDTO } from '../../api/workflow'
 
@@ -117,11 +117,13 @@ interface Props {
 
 const props = defineProps<Props>()
 const message = useMessage()
+const dialog = useDialog()
 
 const loading = ref(false)
 const saving = ref(false)
 const storylines = ref<StorylineDTO[]>([])
 const showCreateModal = ref(false)
+const editingStoryline = ref<StorylineDTO | null>(null)
 
 const formData = ref({
   storyline_type: 'main_plot',
@@ -186,10 +188,16 @@ const loadStorylines = async () => {
   try {
     storylines.value = await workflowApi.getStorylines(props.slug)
   } catch (error: any) {
-    message.error(error?.detail || '加载故事线失败')
+    message.error(error?.response?.data?.detail || '加载故事线失败')
   } finally {
     loading.value = false
   }
+}
+
+const openCreate = () => {
+  editingStoryline.value = null
+  formData.value = { storyline_type: 'main_plot', estimated_chapter_start: 1, estimated_chapter_end: 10 }
+  showCreateModal.value = true
 }
 
 const handleSubmit = async () => {
@@ -200,24 +208,53 @@ const handleSubmit = async () => {
 
   saving.value = true
   try {
-    await workflowApi.createStoryline(props.slug, formData.value)
-    message.success('故事线创建成功')
+    if (editingStoryline.value) {
+      await workflowApi.updateStoryline(props.slug, editingStoryline.value.id, formData.value)
+      message.success('故事线已更新')
+    } else {
+      await workflowApi.createStoryline(props.slug, formData.value)
+      message.success('故事线创建成功')
+    }
     showCreateModal.value = false
     await loadStorylines()
   } catch (error: any) {
-    message.error(error?.detail || '创建故事线失败')
+    message.error(error?.response?.data?.detail || (editingStoryline.value ? '更新失败' : '创建失败'))
   } finally {
     saving.value = false
   }
 }
 
-const editStoryline = (_storyline: StorylineDTO) => {
-  message.info('编辑功能开发中')
+const editStoryline = (storyline: StorylineDTO) => {
+  editingStoryline.value = storyline
+  formData.value = {
+    storyline_type: storyline.storyline_type,
+    estimated_chapter_start: storyline.estimated_chapter_start,
+    estimated_chapter_end: storyline.estimated_chapter_end,
+  }
+  showCreateModal.value = true
 }
 
-const deleteStoryline = async (_id: string) => {
-  message.info('删除功能开发中')
+const deleteStoryline = (id: string) => {
+  dialog.warning({
+    title: '确认删除',
+    content: '删除后无法恢复，确定吗？',
+    positiveText: '删除',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      try {
+        await workflowApi.deleteStoryline(props.slug, id)
+        message.success('已删除')
+        await loadStorylines()
+      } catch (error: any) {
+        message.error(error?.response?.data?.detail || '删除失败')
+      }
+    },
+  })
 }
+
+watch(() => props.slug, (slug) => {
+  if (slug) loadStorylines()
+})
 
 onMounted(() => {
   loadStorylines()

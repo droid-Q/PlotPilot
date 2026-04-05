@@ -156,7 +156,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import { workflowApi } from '../../api/workflow'
 import type { PlotPointDTO } from '../../api/workflow'
@@ -340,6 +340,10 @@ const savePlotArc = async () => {
     saving.value = false
   }
 }
+
+watch(() => props.slug, (slug) => {
+  if (slug) loadPlotArc()
+})
 
 onMounted(() => {
   loadPlotArc()
