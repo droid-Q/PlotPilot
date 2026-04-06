@@ -2,244 +2,301 @@
   <div class="ce-panel">
     <n-empty v-if="!currentChapterNumber" description="请先从左侧选择一个章节" style="margin-top: 40px" />
 
-    <template v-else>
-      <n-tabs v-model:value="activeTab" type="line" size="small" animated class="ce-tabs">
-        <!-- Tab 1: 章节内容 -->
-        <n-tab-pane name="content" tab="📄 章节内容">
-          <n-scrollbar class="ce-scroll">
-            <n-space vertical :size="12" style="padding: 8px 4px 16px">
-              <n-alert v-if="readOnly" type="warning" :show-icon="true" size="small">
-                托管运行中：仅可查看
-              </n-alert>
+    <n-scrollbar v-else class="ce-scroll">
+      <n-space vertical :size="12" style="padding: 8px 4px 16px">
+        <n-alert v-if="readOnly" type="warning" :show-icon="true" size="small">
+          托管运行中：仅可查看
+        </n-alert>
 
-              <!-- 本章规划 -->
-              <n-card v-if="chapterPlan" size="small" :bordered="true" class="ce-card-plan">
-                <template #header>
-                  <span class="card-title">📋 本章规划</span>
-                </template>
-                <n-descriptions :column="1" label-placement="left" size="small" label-style="white-space: nowrap">
-                  <n-descriptions-item label="标题">{{ chapterPlan.title || '—' }}</n-descriptions-item>
-                  <n-descriptions-item v-if="chapterPlan.outline" label="大纲">
-                    <n-text style="font-size: 12px; white-space: pre-wrap">{{ chapterPlan.outline }}</n-text>
-                  </n-descriptions-item>
-                  <n-descriptions-item v-if="chapterPlan.pov_character_id" label="视角">
-                    {{ chapterPlan.pov_character_id }}
-                  </n-descriptions-item>
-                  <n-descriptions-item v-if="chapterPlan.timeline_start || chapterPlan.timeline_end" label="时间线">
-                    {{ chapterPlan.timeline_start || '—' }} → {{ chapterPlan.timeline_end || '—' }}
-                  </n-descriptions-item>
-                  <n-descriptions-item v-if="planMoodLine" label="基调">
-                    {{ planMoodLine }}
-                  </n-descriptions-item>
-                </n-descriptions>
-              </n-card>
+        <!-- 本章规划 -->
+        <n-card v-if="chapterPlan" size="small" :bordered="true" class="ce-card-plan">
+          <template #header>
+            <span class="card-title">📋 本章规划</span>
+          </template>
+          <n-descriptions :column="1" label-placement="left" size="small" label-style="white-space: nowrap">
+            <n-descriptions-item label="标题">{{ chapterPlan.title || '—' }}</n-descriptions-item>
+            <n-descriptions-item v-if="chapterPlan.outline" label="大纲">
+              <n-text style="font-size: 12px; white-space: pre-wrap">{{ chapterPlan.outline }}</n-text>
+            </n-descriptions-item>
+            <n-descriptions-item v-if="chapterPlan.pov_character_id" label="视角">
+              {{ getCharacterName(chapterPlan.pov_character_id) }}
+            </n-descriptions-item>
+            <n-descriptions-item v-if="chapterPlan.timeline_start || chapterPlan.timeline_end" label="时间线">
+              {{ chapterPlan.timeline_start || '—' }} → {{ chapterPlan.timeline_end || '—' }}
+            </n-descriptions-item>
+            <n-descriptions-item v-if="planMoodLine" label="基调">
+              {{ planMoodLine }}
+            </n-descriptions-item>
+          </n-descriptions>
+        </n-card>
 
-              <!-- 节拍规划 -->
-              <n-card v-if="showBeatsCard" size="small" :bordered="true">
-                <template #header>
-                  <span class="card-title">🎬 节拍规划</span>
-                </template>
-                <n-tabs type="segment" size="small" animated>
-                  <n-tab-pane name="macro" tab="宏观">
-                    <ol v-if="beatLines.length" class="ce-beat-list">
-                      <li v-for="(line, bi) in beatLines" :key="bi">{{ line }}</li>
-                    </ol>
-                    <n-empty v-else description="暂无宏观节拍" size="small" />
-                  </n-tab-pane>
-                  
-                  <n-tab-pane name="micro" tab="微观">
-                    <n-space v-if="microBeats.length" vertical :size="8" style="margin-top: 12px">
-                      <div v-for="(beat, i) in microBeats" :key="i" class="micro-beat-item">
-                        <div class="micro-beat-header">
-                          <n-tag :type="getBeatTypeColor(beat.focus)" size="small" round>
-                            {{ beat.focus }}
-                          </n-tag>
-                          <n-text strong style="margin-left: 8px">Beat {{ i + 1 }}</n-text>
-                          <n-text depth="3" style="margin-left: 8px; font-size: 12px">
-                            ({{ beat.target_words }}字)
-                          </n-text>
-                        </div>
-                        <div class="micro-beat-desc">{{ beat.description }}</div>
-                      </div>
-                    </n-space>
-                    <n-empty v-else description="章节生成时自动创建微观节拍" size="small" />
-                  </n-tab-pane>
-                </n-tabs>
-              </n-card>
-
-              <!-- 本章总结 -->
-              <n-card v-if="hasSummaryBlock" size="small" :bordered="true">
-                <template #header>
-                  <span class="card-title">📝 本章总结</span>
-                </template>
-                <n-descriptions
-                  v-if="knowledgeChapter && (knowledgeChapter.summary || knowledgeChapter.key_events || knowledgeChapter.consistency_note)"
-                  :column="1"
-                  label-placement="left"
-                  size="small"
-                >
-                  <n-descriptions-item v-if="knowledgeChapter.summary" label="摘要">
-                    <n-text style="font-size: 12px; white-space: pre-wrap">{{ knowledgeChapter.summary }}</n-text>
-                  </n-descriptions-item>
-                  <n-descriptions-item v-if="knowledgeChapter.key_events" label="关键事件">
-                    <n-text style="font-size: 12px; white-space: pre-wrap">{{ knowledgeChapter.key_events }}</n-text>
-                  </n-descriptions-item>
-                  <n-descriptions-item v-if="knowledgeChapter.consistency_note" label="一致性">
-                    <n-text style="font-size: 12px; white-space: pre-wrap">{{ knowledgeChapter.consistency_note }}</n-text>
-                  </n-descriptions-item>
-                </n-descriptions>
-                <n-text v-else-if="chapterPlan?.description" style="font-size: 12px; white-space: pre-wrap">
-                  {{ chapterPlan.description }}
-                </n-text>
-              </n-card>
-
-              <n-alert v-else-if="storyNodeNotFound" type="warning" :show-icon="true">
-                未在结构树中找到第 {{ currentChapterNumber }} 章的规划节点
-              </n-alert>
-            </n-space>
-          </n-scrollbar>
-        </n-tab-pane>
-
-        <!-- Tab 2: 章节元素 -->
-        <n-tab-pane name="elements" tab="🧩 章节元素">
-          <n-scrollbar class="ce-scroll">
-            <n-space vertical :size="12" style="padding: 8px 4px 16px">
-              <!-- 人物/地点/道具 -->
-              <n-card size="small" :bordered="true" class="ce-card-elements">
-                <template #header>
-                  <div class="ce-card-header-row">
-                    <span class="card-title">👥 人物 / 地点 / 道具</span>
-                    <n-space :size="6">
-                      <n-select
-                        v-model:value="filterType"
-                        :options="elementTypeOptions"
-                        size="tiny"
-                        style="width: 80px"
-                        clearable
-                        placeholder="类型"
-                        @update:value="loadElements"
-                      />
-                      <n-button size="tiny" secondary :loading="loading" @click="loadElements">刷新</n-button>
-                    </n-space>
+        <!-- 节拍规划 -->
+        <n-card v-if="showBeatsCard" size="small" :bordered="true">
+          <template #header>
+            <span class="card-title">🎬 节拍规划</span>
+          </template>
+          <n-tabs type="segment" size="small" animated>
+            <n-tab-pane name="macro" tab="宏观">
+              <ol v-if="beatLines.length" class="ce-beat-list">
+                <li v-for="(line, bi) in beatLines" :key="bi">{{ line }}</li>
+              </ol>
+              <n-empty v-else description="暂无宏观节拍" size="small" />
+            </n-tab-pane>
+            
+            <n-tab-pane name="micro" tab="微观">
+              <n-space v-if="microBeats.length" vertical :size="8" style="margin-top: 12px">
+                <div v-for="(beat, i) in microBeats" :key="i" class="micro-beat-item">
+                  <div class="micro-beat-header">
+                    <n-tag :type="getBeatTypeColor(beat.focus)" size="small" round>
+                      {{ beat.focus }}
+                    </n-tag>
+                    <n-text strong style="margin-left: 8px">Beat {{ i + 1 }}</n-text>
+                    <n-text depth="3" style="margin-left: 8px; font-size: 12px">
+                      ({{ beat.target_words }}字)
+                    </n-text>
                   </div>
-                </template>
+                  <div class="micro-beat-desc">{{ beat.description }}</div>
+                </div>
+              </n-space>
+              <n-empty v-else description="章节生成时自动创建微观节拍" size="small" />
+            </n-tab-pane>
+          </n-tabs>
+        </n-card>
 
-                <n-spin :show="loading">
-                  <n-space vertical :size="8">
-                    <n-space v-if="groupedCharacters.length" vertical :size="6">
-                      <n-text strong class="ce-group-label">👤 人物</n-text>
-                      <n-space vertical :size="4">
-                        <div v-for="elem in groupedCharacters" :key="elem.id" class="ce-item-readonly">
-                          <n-text class="ce-element-name">{{ elem.element_id }}</n-text>
-                          <n-tag size="tiny" round type="default">{{ relationLabel(elem.relation_type) }}</n-tag>
-                          <n-tag :type="getImportanceType(elem.importance)" size="tiny" round>
-                            {{ importanceLabel(elem.importance) }}
-                          </n-tag>
-                          <n-text v-if="elem.notes" depth="3" style="font-size: 12px; margin-left: 8px">
-                            {{ elem.notes }}
-                          </n-text>
-                        </div>
-                      </n-space>
-                    </n-space>
+        <!-- 本章总结 -->
+        <n-card v-if="hasSummaryBlock" size="small" :bordered="true">
+          <template #header>
+            <span class="card-title">📝 本章总结</span>
+          </template>
+          <n-descriptions
+            v-if="knowledgeChapter && (knowledgeChapter.summary || knowledgeChapter.key_events || knowledgeChapter.consistency_note)"
+            :column="1"
+            label-placement="left"
+            size="small"
+          >
+            <n-descriptions-item v-if="knowledgeChapter.summary" label="摘要">
+              <n-text style="font-size: 12px; white-space: pre-wrap">{{ knowledgeChapter.summary }}</n-text>
+            </n-descriptions-item>
+            <n-descriptions-item v-if="knowledgeChapter.key_events" label="关键事件">
+              <n-text style="font-size: 12px; white-space: pre-wrap">{{ knowledgeChapter.key_events }}</n-text>
+            </n-descriptions-item>
+            <n-descriptions-item v-if="knowledgeChapter.consistency_note" label="一致性">
+              <n-text style="font-size: 12px; white-space: pre-wrap">{{ knowledgeChapter.consistency_note }}</n-text>
+            </n-descriptions-item>
+          </n-descriptions>
+          <n-text v-else-if="chapterPlan?.description" style="font-size: 12px; white-space: pre-wrap">
+            {{ chapterPlan.description }}
+          </n-text>
+        </n-card>
 
-                    <n-space v-if="groupedLocations.length" vertical :size="6">
-                      <n-text strong class="ce-group-label">📍 地点</n-text>
-                      <n-space vertical :size="4">
-                        <div v-for="elem in groupedLocations" :key="elem.id" class="ce-item-readonly">
-                          <n-text class="ce-element-name">{{ elem.element_id }}</n-text>
-                          <n-tag size="tiny" round type="default">{{ relationLabel(elem.relation_type) }}</n-tag>
-                          <n-tag :type="getImportanceType(elem.importance)" size="tiny" round>
-                            {{ importanceLabel(elem.importance) }}
-                          </n-tag>
-                          <n-text v-if="elem.notes" depth="3" style="font-size: 12px; margin-left: 8px">
-                            {{ elem.notes }}
-                          </n-text>
-                        </div>
-                      </n-space>
-                    </n-space>
+        <n-alert v-else-if="storyNodeNotFound" type="warning" :show-icon="true">
+          未在结构树中找到第 {{ currentChapterNumber }} 章的规划节点
+        </n-alert>
 
-                    <n-space v-if="groupedOther.length" vertical :size="6">
-                      <n-text strong class="ce-group-label">📦 其他</n-text>
-                      <n-space vertical :size="4">
-                        <div v-for="elem in groupedOther" :key="elem.id" class="ce-item-readonly">
-                          <n-tag :type="elemTypeColor(elem.element_type)" size="tiny" round>
-                            {{ elemTypeLabel(elem.element_type) }}
-                          </n-tag>
-                          <n-text class="ce-element-name">{{ elem.element_id }}</n-text>
-                          <n-tag size="tiny" round type="default">{{ relationLabel(elem.relation_type) }}</n-tag>
-                          <n-tag :type="getImportanceType(elem.importance)" size="tiny" round>
-                            {{ importanceLabel(elem.importance) }}
-                          </n-tag>
-                          <n-text v-if="elem.notes" depth="3" style="font-size: 12px; margin-left: 8px">
-                            {{ elem.notes }}
-                          </n-text>
-                        </div>
-                      </n-space>
-                    </n-space>
-
-                    <n-empty v-if="!loading && elements.length === 0" description="暂无关联元素" size="small" />
-                  </n-space>
-                </n-spin>
-              </n-card>
-
-              <!-- 伏笔回收建议 -->
-              <n-card size="small" :bordered="true">
-                <template #header>
-                  <span class="card-title">🔗 伏笔回收建议</span>
-                </template>
-                <ForeshadowChapterSuggestionsPanel
-                  :slug="slug"
-                  :current-chapter-number="currentChapterNumber"
-                  :prefill-outline="chapterPlan?.outline || ''"
-                  embedded
-                  compact
+        <!-- 人物/地点/道具 -->
+        <n-card size="small" :bordered="true" class="ce-card-elements">
+          <template #header>
+            <div class="ce-card-header-row">
+              <span class="card-title">👥 人物 / 地点 / 道具</span>
+              <n-space :size="6">
+                <n-select
+                  v-model:value="filterType"
+                  :options="elementTypeOptions"
+                  size="tiny"
+                  style="width: 80px"
+                  clearable
+                  placeholder="类型"
+                  @update:value="loadElements"
                 />
-              </n-card>
+                <n-button size="tiny" secondary :loading="loading" @click="loadElements">刷新</n-button>
+              </n-space>
+            </div>
+          </template>
 
-              <!-- 全托管管线摘要 -->
-              <n-card
-                v-if="autopilotChapterReview && currentChapterNumber === autopilotChapterReview.chapter_number"
-                size="small"
-                :bordered="true"
-              >
-                <template #header>
-                  <span class="card-title">🤖 自动审阅</span>
-                </template>
-                <n-space vertical :size="6">
-                  <n-descriptions :column="1" label-placement="left" size="small">
-                    <n-descriptions-item label="张力">{{ autopilotChapterReview.tension }} / 10</n-descriptions-item>
-                    <n-descriptions-item label="叙事同步">
-                      <n-tag
-                        :type="autopilotChapterReview.narrative_sync_ok ? 'success' : 'warning'"
-                        size="tiny"
-                        round
-                      >
-                        {{ autopilotChapterReview.narrative_sync_ok ? '已落库' : '异常' }}
-                      </n-tag>
-                    </n-descriptions-item>
-                    <n-descriptions-item label="文风">
-                      {{
-                        autopilotChapterReview.similarity_score != null
-                          ? Number(autopilotChapterReview.similarity_score).toFixed(3)
-                          : '—'
-                      }}
-                      <n-tag
-                        :type="autopilotChapterReview.drift_alert ? 'error' : 'default'"
-                        size="tiny"
-                        round
-                        style="margin-left: 6px"
-                      >
-                        {{ autopilotChapterReview.drift_alert ? '漂移告警' : '正常' }}
-                      </n-tag>
-                    </n-descriptions-item>
-                  </n-descriptions>
+          <n-spin :show="loading">
+            <n-space vertical :size="8">
+              <n-space v-if="groupedCharacters.length" vertical :size="6">
+                <n-text strong class="ce-group-label">👤 人物</n-text>
+                <n-space vertical :size="4">
+                  <div v-for="elem in groupedCharacters" :key="elem.id" class="ce-item-readonly">
+                    <n-text class="ce-element-name">{{ getElementDisplayName(elem.element_id, 'character') }}</n-text>
+                    <n-tag size="tiny" round type="default">{{ relationLabel(elem.relation_type) }}</n-tag>
+                    <n-tag :type="getImportanceType(elem.importance)" size="tiny" round>
+                      {{ importanceLabel(elem.importance) }}
+                    </n-tag>
+                    <n-text v-if="elem.notes" depth="3" style="font-size: 12px; margin-left: 8px">
+                      {{ elem.notes }}
+                    </n-text>
+                  </div>
                 </n-space>
-              </n-card>
+              </n-space>
+
+              <n-space v-if="groupedLocations.length" vertical :size="6">
+                <n-text strong class="ce-group-label">📍 地点</n-text>
+                <n-space vertical :size="4">
+                  <div v-for="elem in groupedLocations" :key="elem.id" class="ce-item-readonly">
+                    <n-text class="ce-element-name">{{ getElementDisplayName(elem.element_id, 'location') }}</n-text>
+                    <n-tag size="tiny" round type="default">{{ relationLabel(elem.relation_type) }}</n-tag>
+                    <n-tag :type="getImportanceType(elem.importance)" size="tiny" round>
+                      {{ importanceLabel(elem.importance) }}
+                    </n-tag>
+                    <n-text v-if="elem.notes" depth="3" style="font-size: 12px; margin-left: 8px">
+                      {{ elem.notes }}
+                    </n-text>
+                  </div>
+                </n-space>
+              </n-space>
+
+              <n-space v-if="groupedOther.length" vertical :size="6">
+                <n-text strong class="ce-group-label">📦 其他</n-text>
+                <n-space vertical :size="4">
+                  <div v-for="elem in groupedOther" :key="elem.id" class="ce-item-readonly">
+                    <n-tag :type="elemTypeColor(elem.element_type)" size="tiny" round>
+                      {{ elemTypeLabel(elem.element_type) }}
+                    </n-tag>
+                    <n-text class="ce-element-name">{{ getElementDisplayName(elem.element_id, elem.element_type) }}</n-text>
+                    <n-tag size="tiny" round type="default">{{ relationLabel(elem.relation_type) }}</n-tag>
+                    <n-tag :type="getImportanceType(elem.importance)" size="tiny" round>
+                      {{ importanceLabel(elem.importance) }}
+                    </n-tag>
+                    <n-text v-if="elem.notes" depth="3" style="font-size: 12px; margin-left: 8px">
+                      {{ elem.notes }}
+                    </n-text>
+                  </div>
+                </n-space>
+              </n-space>
+
+              <n-empty v-if="!loading && elements.length === 0" description="暂无关联元素" size="small" />
             </n-space>
-          </n-scrollbar>
-        </n-tab-pane>
-      </n-tabs>
-    </template>
+          </n-spin>
+        </n-card>
+
+        <!-- 伏笔回收建议 -->
+        <n-card size="small" :bordered="true">
+          <template #header>
+            <span class="card-title">🔗 伏笔回收建议</span>
+          </template>
+          <ForeshadowChapterSuggestionsPanel
+            :slug="slug"
+            :current-chapter-number="currentChapterNumber"
+            :prefill-outline="chapterPlan?.outline || ''"
+            embedded
+            compact
+            auto-run
+          />
+        </n-card>
+
+        <!-- 全托管管线摘要 -->
+        <n-card
+          v-if="autopilotChapterReview && currentChapterNumber === autopilotChapterReview.chapter_number"
+          size="small"
+          :bordered="true"
+        >
+          <template #header>
+            <span class="card-title">🤖 自动审阅</span>
+          </template>
+          <n-space vertical :size="8">
+            <div class="review-row">
+              <n-text depth="3">张力</n-text>
+              <div class="tension-bar">
+                <div class="tension-fill" :style="{ width: `${autopilotChapterReview.tension * 10}%` }"></div>
+                <n-text class="tension-value">{{ autopilotChapterReview.tension }}/10</n-text>
+              </div>
+            </div>
+            <div class="review-row">
+              <n-text depth="3">叙事同步</n-text>
+              <n-tag
+                :type="autopilotChapterReview.narrative_sync_ok ? 'success' : 'warning'"
+                size="small"
+                round
+              >
+                {{ autopilotChapterReview.narrative_sync_ok ? '已落库' : '异常' }}
+              </n-tag>
+            </div>
+            <div class="review-row">
+              <n-text depth="3">文风相似度</n-text>
+              <n-text>
+                {{
+                  autopilotChapterReview.similarity_score != null
+                    ? Number(autopilotChapterReview.similarity_score).toFixed(3)
+                    : '—'
+                }}
+              </n-text>
+            </div>
+            <div class="review-row">
+              <n-text depth="3">漂移告警</n-text>
+              <n-tag :type="autopilotChapterReview.drift_alert ? 'error' : 'success'" size="small" round>
+                {{ autopilotChapterReview.drift_alert ? '是' : '否' }}
+              </n-tag>
+            </div>
+            <div v-if="autopilotChapterReview.at" class="review-row">
+              <n-text depth="3">审阅时间</n-text>
+              <n-text depth="3" style="font-size: 12px">{{ formatTime(autopilotChapterReview.at) }}</n-text>
+            </div>
+          </n-space>
+        </n-card>
+
+        <!-- AI 审阅与质检 -->
+        <n-card
+          v-if="lastWorkflowResult && qcChapterNumber != null"
+          size="small"
+          :bordered="true"
+        >
+          <template #header>
+            <span class="card-title">✨ AI 生成质检</span>
+          </template>
+          <n-space vertical :size="10">
+            <n-alert
+              v-if="currentChapterNumber !== qcChapterNumber"
+              type="info"
+              size="small"
+            >
+              为第 {{ qcChapterNumber }} 章质检结果
+            </n-alert>
+
+            <ConsistencyReportPanel
+              :report="lastWorkflowResult.consistency_report"
+              :token-count="lastWorkflowResult.token_count"
+              @location-click="onLocationClick"
+            />
+
+            <n-collapse
+              v-if="lastWorkflowResult.style_warnings && lastWorkflowResult.style_warnings.length > 0"
+              class="qc-collapse"
+            >
+              <n-collapse-item :title="`俗套句式 ${lastWorkflowResult.style_warnings.length} 处`" name="cliche">
+                <n-space vertical :size="6">
+                  <n-alert
+                    v-for="(w, i) in lastWorkflowResult.style_warnings"
+                    :key="i"
+                    :type="w.severity === 'warning' ? 'warning' : 'info'"
+                    :title="w.pattern"
+                    size="small"
+                  >
+                    「{{ w.text }}」
+                  </n-alert>
+                </n-space>
+              </n-collapse-item>
+            </n-collapse>
+
+            <n-collapse v-if="ghostAnnotationLines.length > 0" class="qc-collapse">
+              <n-collapse-item :title="`冲突批注 ${ghostAnnotationLines.length} 条`" name="ghost">
+                <n-space vertical :size="6">
+                  <n-alert
+                    v-for="(line, gi) in ghostAnnotationLines"
+                    :key="gi"
+                    type="warning"
+                    size="small"
+                  >
+                    {{ line }}
+                  </n-alert>
+                </n-space>
+              </n-collapse-item>
+            </n-collapse>
+          </n-space>
+        </n-card>
+      </n-space>
+    </n-scrollbar>
   </div>
 </template>
 
@@ -254,9 +311,11 @@ import { planningApi } from '../../api/planning'
 import type { StoryNode } from '../../api/planning'
 import { knowledgeApi } from '../../api/knowledge'
 import type { ChapterSummary } from '../../api/knowledge'
+import { bibleApi, type CharacterDTO, type LocationDTO } from '../../api/bible'
 import type { GenerateChapterWorkflowResponse } from '../../api/workflow'
 import type { AutopilotChapterAudit } from './ChapterStatusPanel.vue'
 import ForeshadowChapterSuggestionsPanel from './ForeshadowChapterSuggestionsPanel.vue'
+import ConsistencyReportPanel from './ConsistencyReportPanel.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -278,7 +337,6 @@ const props = withDefaults(
 
 const message = useMessage()
 
-const activeTab = ref('content')
 const elements = ref<ChapterElementDTO[]>([])
 const loading = ref(false)
 const storyNodeId = ref<string | null>(null)
@@ -286,6 +344,10 @@ const storyNodeNotFound = ref(false)
 const chapterPlan = ref<StoryNode | null>(null)
 const knowledgeChapter = ref<ChapterSummary | null>(null)
 const filterType = ref<ElementType | undefined>(undefined)
+
+// Bible 数据用于 ID -> name 映射
+const bibleCharacters = ref<CharacterDTO[]>([])
+const bibleLocations = ref<LocationDTO[]>([])
 
 const elementTypeOptions = [
   { label: '人物', value: 'character' },
@@ -328,6 +390,26 @@ const getImportanceType = (importance: string): 'error' | 'warning' | 'info' | '
     minor: 'default'
   }
   return map[importance] || 'default'
+}
+
+// 获取元素显示名称（从 Bible 映射）
+const getElementDisplayName = (elementId: string, type: string): string => {
+  if (type === 'character') {
+    const char = bibleCharacters.value.find(c => c.id === elementId)
+    if (char) return char.name
+  }
+  if (type === 'location') {
+    const loc = bibleLocations.value.find(l => l.id === elementId)
+    if (loc) return loc.name
+  }
+  // 没找到映射时返回原 ID
+  return elementId
+}
+
+// 获取人物名称
+const getCharacterName = (charId: string): string => {
+  const char = bibleCharacters.value.find(c => c.id === charId)
+  return char ? char.name : charId
 }
 
 const groupedCharacters = computed(() =>
@@ -390,6 +472,42 @@ const hasSummaryBlock = computed(() => {
   return !!chapterPlan.value?.description?.trim()
 })
 
+const ghostAnnotationLines = computed(() => {
+  const raw = props.lastWorkflowResult?.ghost_annotations
+  if (!raw || !Array.isArray(raw) || raw.length === 0) return []
+  const lines: string[] = []
+  for (const item of raw) {
+    if (item == null) continue
+    if (typeof item === 'string') {
+      lines.push(item)
+      continue
+    }
+    if (typeof item === 'object') {
+      const o = item as Record<string, unknown>
+      const msg =
+        (typeof o.message === 'string' && o.message) ||
+        (typeof o.summary === 'string' && o.summary) ||
+        (typeof o.text === 'string' && o.text) ||
+        JSON.stringify(o)
+      lines.push(msg)
+    }
+  }
+  return lines
+})
+
+function formatTime(t: string) {
+  try {
+    return new Date(t).toLocaleString('zh-CN', {
+      month: 'numeric',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    })
+  } catch {
+    return t
+  }
+}
+
 function findChapterNode(nodes: StoryNode[], num: number): StoryNode | null {
   for (const node of nodes) {
     if (node.node_type === 'chapter' && node.number === num) return node
@@ -446,15 +564,35 @@ const loadElements = async () => {
   }
 }
 
+// 加载 Bible 数据用于名称映射
+async function loadBible() {
+  try {
+    const bible = await bibleApi.getBible(props.slug)
+    bibleCharacters.value = bible.characters || []
+    bibleLocations.value = bible.locations || []
+  } catch {
+    // Bible 不存在时不报错
+    bibleCharacters.value = []
+    bibleLocations.value = []
+  }
+}
+
+function onLocationClick(location: number) {
+  message.info(`问题位置约在第 ${location} 字附近`)
+}
+
 watch(() => props.slug, async (slug) => {
   if (slug) {
     elements.value = []
     storyNodeId.value = null
     chapterPlan.value = null
     storyNodeNotFound.value = false
-    await resolveStoryNode()
-    await loadKnowledgeChapter()
-    await loadElements()
+    await Promise.all([
+      loadBible(),
+      resolveStoryNode(),
+      loadKnowledgeChapter(),
+      loadElements()
+    ])
   }
 })
 
@@ -473,6 +611,7 @@ watch(deskTick, async () => {
 })
 
 onMounted(async () => {
+  await loadBible()
   await resolveStoryNode()
   await loadKnowledgeChapter()
   await loadElements()
@@ -489,26 +628,8 @@ onMounted(async () => {
   overflow: hidden;
 }
 
-.ce-tabs {
-  height: 100%;
-}
-
-.ce-tabs :deep(.n-tabs-nav) {
-  padding: 0 12px;
-}
-
-.ce-tabs :deep(.n-tabs-pane-wrapper) {
-  height: calc(100% - 40px);
-  overflow: hidden;
-}
-
-.ce-tabs :deep(.n-tab-pane) {
-  height: 100%;
-  overflow: hidden;
-}
-
 .ce-scroll {
-  height: 100%;
+  flex: 1;
   min-height: 0;
 }
 
@@ -594,5 +715,46 @@ onMounted(async () => {
   font-weight: 500;
   color: var(--n-text-color-1);
   margin-right: 8px;
+}
+
+/* 审阅行 */
+.review-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+/* 张力进度条 */
+.tension-bar {
+  position: relative;
+  width: 100px;
+  height: 20px;
+  background: var(--n-color-modal);
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--n-border-color);
+}
+
+.tension-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #10b981, #f59e0b, #ef4444);
+  border-radius: 10px;
+  transition: width 0.3s ease;
+}
+
+.tension-value {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--n-text-color-1);
+}
+
+/* 质检折叠 */
+.qc-collapse :deep(.n-collapse-item__header) {
+  font-size: 12px;
 }
 </style>
