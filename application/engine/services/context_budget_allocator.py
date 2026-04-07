@@ -453,7 +453,7 @@ class ContextBudgetAllocator:
         return ""
     
     def _get_pending_foreshadowings(self, novel_id: str, chapter_number: int) -> str:
-        """获取待回收伏笔（轨道二核心）"""
+        """获取待回收伏笔（轨道二核心）- 按预期回收章节优先排序。"""
         if not self.foreshadowing_repo:
             return ""
         
@@ -470,21 +470,73 @@ class ContextBudgetAllocator:
             
             lines = []
             
-            if pending_foreshadows:
-                lines.append("【待回收伏笔】")
-                for f in pending_foreshadows[:10]:  # 最多 10 个
-                    importance_mark = "⚠️" if f.importance.value >= 3 else ""
-                    lines.append(
-                        f"- Ch{f.planted_in_chapter} {importance_mark}: {f.description}"
-                    )
-                    if f.suggested_resolve_chapter:
-                        lines.append(f"  建议回收章节: ~{f.suggested_resolve_chapter}")
+            # 对伏笔按预期回收章节排序
+            def foreshadow_sort_key(f):
+                if f.suggested_resolve_chapter:
+                    if f.suggested_resolve_chapter <= chapter_number:
+                        # 已到期，最高优先级
+                        return (0, -f.importance.value, f.suggested_resolve_chapter)
+                    else:
+                        # 未到期，按距离排序
+                        return (1, -f.importance.value, f.suggested_resolve_chapter)
+                else:
+                    # 无预期章节，放最后
+                    return (2, -f.importance.value, 9999)
             
-            if pending_subtext:
-                lines.append("\n【潜台词账本】")
-                for entry in pending_subtext[:5]:  # 最多 5 个
+            sorted_foreshadows = sorted(pending_foreshadows, key=foreshadow_sort_key)
+            
+            if sorted_foreshadows:
+                lines.append("【待回收伏笔】")
+                for f in sorted_foreshadows[:10]:  # 最多 10 个
+                    importance_mark = "⚠️" if f.importance.value >= 3 else ""
+                    
+                    # 构建状态标记
+                    status_mark = ""
+                    if f.suggested_resolve_chapter:
+                        if f.suggested_resolve_chapter <= chapter_number:
+                            status_mark = "🔴已过期"
+                        elif f.suggested_resolve_chapter <= chapter_number + 3:
+                            status_mark = "🟡即将到期"
+                        else:
+                            status_mark = f"⏳预期Ch{f.suggested_resolve_chapter}"
+                    
                     lines.append(
-                        f"- Ch{entry.chapter} [{entry.character_id}]: {entry.hidden_clue}"
+                        f"- Ch{f.planted_in_chapter} {importance_mark} {status_mark}: {f.description}"
+                    )
+            
+            # 对潜台词按预期回收章节排序
+            def subtext_sort_key(e):
+                suggested = getattr(e, 'suggested_resolve_chapter', None)
+                importance = getattr(e, 'importance', 'medium')
+                importance_val = {'low': 1, 'medium': 2, 'high': 3, 'critical': 4}.get(importance, 2)
+                
+                if suggested:
+                    if suggested <= chapter_number:
+                        return (0, -importance_val, suggested)
+                    else:
+                        return (1, -importance_val, suggested)
+                else:
+                    return (2, -importance_val, 9999)
+            
+            sorted_subtext = sorted(pending_subtext, key=subtext_sort_key)
+            
+            if sorted_subtext:
+                lines.append("\n【潜台词账本】")
+                for entry in sorted_subtext[:5]:  # 最多 5 个
+                    importance = getattr(entry, 'importance', 'medium')
+                    suggested = getattr(entry, 'suggested_resolve_chapter', None)
+                    
+                    status_mark = ""
+                    if suggested:
+                        if suggested <= chapter_number:
+                            status_mark = "🔴已过期"
+                        elif suggested <= chapter_number + 3:
+                            status_mark = "🟡即将到期"
+                        else:
+                            status_mark = f"⏳预期Ch{suggested}"
+                    
+                    lines.append(
+                        f"- Ch{entry.chapter} [{entry.character_id}] {status_mark}: {entry.hidden_clue}"
                     )
                     if entry.sensory_anchors:
                         anchors = ", ".join(f"{k}:{v}" for k, v in entry.sensory_anchors.items())
