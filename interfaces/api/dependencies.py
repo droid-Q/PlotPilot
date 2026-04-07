@@ -791,6 +791,22 @@ def get_mutation_applier():
     return MutationApplier(narrative_event_repo)
 
 
+def get_macro_diagnosis_service():
+    """获取宏观诊断服务
+
+    Returns:
+        MacroDiagnosisService 实例
+    """
+    from application.audit.services.macro_diagnosis_service import MacroDiagnosisService
+    from application.audit.services.macro_refactor_scanner import MacroRefactorScanner
+    from infrastructure.persistence.database.sqlite_narrative_event_repository import SqliteNarrativeEventRepository
+
+    db = get_database()
+    narrative_event_repo = SqliteNarrativeEventRepository(db)
+    scanner = MacroRefactorScanner(narrative_event_repo)
+    return MacroDiagnosisService(db, scanner)
+
+
 def get_tension_analyzer():
     """获取张力分析器
 
