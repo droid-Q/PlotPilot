@@ -15,6 +15,7 @@ env:
   PYTHON_VERSION: "3.12.13"
   PYTHON_TAG: "20260414"
   PYTHON_MACOS_BASE: "https://github.com/astral-sh/python-build-standalone/releases/download"
+  VERSION: ${{ github.ref_name || 'latest' }}
 
 jobs:
   build-arm64:
@@ -43,22 +44,28 @@ jobs:
         working-directory: frontend
 
       - name: Inject Python runtime into frontend for bundling
-        run: |
-          # Copy embedded Python into frontend/src-tauri/ for tauri to bundle
-          cp -R python_macos frontend/src-tauri/
+        run: cp -R python_macos frontend/src-tauri/
 
       - name: Build Tauri (aarch64)
-        run: |
-          cd frontend && npm run tauri:build
+        run: cd frontend && npm run tauri:build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUSTFLAGS: "-C link-arg=-mmacosx-version-min=10.15"
 
-      - name: Upload arm64 .app
+      - name: Package .app
+        run: |
+          ditto -c -k --keepParent frontend/src-tauri/target/release/bundle/macos/PlotPilot.app \
+            PlotPilot-${{ env.VERSION }}-macos-aarch64.zip
+          sha256sum PlotPilot-${{ env.VERSION }}-macos-aarch64.zip \
+            | awk '{print $1}' > PlotPilot-${{ env.VERSION }}-macos-aarch64.zip.sha256
+
+      - name: Upload arm64 zip + sha256
         uses: actions/upload-artifact@v4
         with:
-          name: plotpilot-arm64
-          path: frontend/src-tauri/target/release/bundle/macos/PlotPilot.app
+          name: plotpilot-arm64-zip
+          path: |
+            PlotPilot-${{ env.VERSION }}-macos-aarch64.zip
+            PlotPilot-${{ env.VERSION }}-macos-aarch64.zip.sha256
           retention-days: 5
 
   build-intel:
@@ -87,21 +94,28 @@ jobs:
         working-directory: frontend
 
       - name: Inject Python runtime into frontend for bundling
-        run: |
-          cp -R python_macos frontend/src-tauri/
+        run: cp -R python_macos frontend/src-tauri/
 
       - name: Build Tauri (x86_64)
-        run: |
-          cd frontend && npm run tauri:build
+        run: cd frontend && npm run tauri:build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUSTFLAGS: "-C link-arg=-mmacosx-version-min=10.15"
 
-      - name: Upload x86_64 .app
+      - name: Package .app
+        run: |
+          ditto -c -k --keepParent frontend/src-tauri/target/release/bundle/macos/PlotPilot.app \
+            PlotPilot-${{ env.VERSION }}-macos-x86_64.zip
+          sha256sum PlotPilot-${{ env.VERSION }}-macos-x86_64.zip \
+            | awk '{print $1}' > PlotPilot-${{ env.VERSION }}-macos-x86_64.zip.sha256
+
+      - name: Upload x86_64 zip + sha256
         uses: actions/upload-artifact@v4
         with:
-          name: plotpilot-x86_64
-          path: frontend/src-tauri/target/release/bundle/macos/PlotPilot.app
+          name: plotpilot-x86_64-zip
+          path: |
+            PlotPilot-${{ env.VERSION }}-macos-x86_64.zip
+            PlotPilot-${{ env.VERSION }}-macos-x86_64.zip.sha256
           retention-days: 5
 
   combine:
@@ -113,53 +127,76 @@ jobs:
       - name: Download arm64 .app
         uses: actions/download-artifact@v4
         with:
-          name: plotpilot-arm64
+          name: plotpilot-arm64-zip
           path: arm64
 
       - name: Download x86_64 .app
         uses: actions/download-artifact@v4
         with:
-          name: plotpilot-x86_64
+          name: plotpilot-x86_64-zip
           path: intel
+
+      - name: Unzip both for lipo
+        run: |
+          unzip -q arm64/PlotPilot-*.zip -d arm64_app
+          unzip -q intel/PlotPilot-*.zip -d intel_app
+          ls arm64_app/ intel_app/
 
       - name: Combine Rust binaries with lipo
         run: |
-          cp arm64/PlotPilot.app/Contents/MacOS/PlotPilot arm64_binary
-          cp intel/PlotPilot.app/Contents/MacOS/PlotPilot intel_binary
+          cp arm64_app/PlotPilot.app/Contents/MacOS/PlotPilot arm64_binary
+          cp intel_app/PlotPilot.app/Contents/MacOS/PlotPilot intel_binary
           lipo -create -output universal_binary arm64_binary intel_binary
+          cp universal_binary arm64_app/PlotPilot.app/Contents/MacOS/PlotPilot
           ls -lh universal_binary
-          cp universal_binary arm64/PlotPilot.app/Contents/MacOS/PlotPilot
 
       - name: Bundle both Python runtimes into universal app
         run: |
-          # The arm64 app already has aarch64 Python bundled by CI
-          # We need to also add x86_64 Python to it
-          # Copy x86_64 Python into the arm64 app's Resources
-          cp -R intel/PlotPilot.app/Contents/Resources/python_macos \
-             arm64/PlotPilot.app/Contents/Resources/python_macos_x86_64
-
-          # Verify structure
-          ls arm64/PlotPilot.app/Contents/Resources/
+          cp -R intel_app/PlotPilot.app/Contents/Resources/python_macos \
+             arm64_app/PlotPilot.app/Contents/Resources/python_macos_x86_64
+          ls arm64_app/PlotPilot.app/Contents/Resources/
 
       - name: Re-sign for universal
         run: |
-          # Note: requires Apple certificate configured in GitHub Actions
-          # For local builds: codesign -f -s - "PlotPilot.app"
           if [ -n "$CODESIGN_IDENTITY" ]; then
-            codesign -f -s "$CODESIGN_IDENTITY" arm64/PlotPilot.app || true
+            codesign -f -s "$CODESIGN_IDENTITY" arm64_app/PlotPilot.app || true
           fi
 
       - name: Create DMG (universal)
         run: |
-          DMG_PATH="PlotPilot-macos-universal.dmg"
+          DMG_OUT="PlotPilot-${{ env.VERSION }}-macos-universal.dmg"
           TEMP_DIR=$(mktemp -d)
-          cp -R arm64/PlotPilot.app "$TEMP_DIR/"
-          hdiutil create -volname "PlotPilot" -fs HFS+ -srcfolder "$TEMP_DIR" -ov -format UDZO "$DMG_PATH"
-          ls -lh "$DMG_PATH"
+          cp -R arm64_app/PlotPilot.app "$TEMP_DIR/"
+          hdiutil create -volname "PlotPilot" -fs HFS+ -srcfolder "$TEMP_DIR" -ov -format UDZO "$DMG_OUT"
+          ls -lh "$DMG_OUT"
 
-      - name: Upload universal DMG
+      - name: Create ZIP (universal) + sha256 for both
+        run: |
+          ZIP_OUT="PlotPilot-${{ env.VERSION }}-macos-universal.zip"
+          ditto -c -k --keepParent arm64_app/PlotPilot.app "$ZIP_OUT"
+
+          # sha256 for DMG
+          sha256sum PlotPilot-${{ env.VERSION }}-macos-universal.dmg \
+            | awk '{print $1}' > PlotPilot-${{ env.VERSION }}-macos-universal.dmg.sha256
+
+          # sha256 for ZIP
+          sha256sum "$ZIP_OUT" \
+            | awk '{print $1}' > "$ZIP_OUT.sha256"
+
+          # Verify
+          echo "=== DMG sha256 ==="
+          cat PlotPilot-${{ env.VERSION }}-macos-universal.dmg.sha256
+          echo "=== ZIP sha256 ==="
+          cat "$ZIP_OUT.sha256"
+          ls -lh PlotPilot-${{ env.VERSION }}-macos-universal.dmg "$ZIP_OUT"
+
+      - name: Upload final artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: plotpilot-macos-universal-dmg
-          path: PlotPilot-macos-universal.dmg
+          name: plotpilot-macos-universal
+          path: |
+            PlotPilot-${{ env.VERSION }}-macos-universal.dmg
+            PlotPilot-${{ env.VERSION }}-macos-universal.dmg.sha256
+            PlotPilot-${{ env.VERSION }}-macos-universal.zip
+            PlotPilot-${{ env.VERSION }}-macos-universal.zip.sha256
           retention-days: 5
