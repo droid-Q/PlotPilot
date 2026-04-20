@@ -42,7 +42,11 @@
       "minimumSystemVersion": "10.15"
     },
     "resources": {
-      "../../application": "application"
+      "../../application": "application",
+      "../../interfaces": "interfaces",
+      "../../domain": "domain",
+      "../../infrastructure": "infrastructure",
+      "../../scripts": "scripts"
     },
     "windows": {
       "webviewInstallMode": {
