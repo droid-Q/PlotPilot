@@ -62,6 +62,10 @@ jobs:
 
           # DMG (already built by Tauri)
           DMG_PATH=$(find frontend/src-tauri/target/release/bundle/dmg -name "PlotPilot_*.dmg" | head -1)
+          if [ -z "$DMG_PATH" ]; then
+            echo "ERROR: DMG file not found in bundle/dmg directory"
+            exit 1
+          fi
           cp "$DMG_PATH" "PlotPilot-${{ env.VERSION }}-macos-aarch64.dmg"
           sha256sum "PlotPilot-${{ env.VERSION }}-macos-aarch64.dmg" \
             | awk '{print $1}' > "PlotPilot-${{ env.VERSION }}-macos-aarch64.dmg.sha256"
@@ -128,6 +132,10 @@ jobs:
 
           # DMG (already built by Tauri)
           DMG_PATH=$(find frontend/src-tauri/target/release/bundle/dmg -name "PlotPilot_*.dmg" | head -1)
+          if [ -z "$DMG_PATH" ]; then
+            echo "ERROR: DMG file not found in bundle/dmg directory"
+            exit 1
+          fi
           cp "$DMG_PATH" "PlotPilot-${{ env.VERSION }}-macos-x86_64.dmg"
           sha256sum "PlotPilot-${{ env.VERSION }}-macos-x86_64.dmg" \
             | awk '{print $1}' > "PlotPilot-${{ env.VERSION }}-macos-x86_64.dmg.sha256"
