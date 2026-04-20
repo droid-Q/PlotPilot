@@ -114,7 +114,8 @@ fn launch_mac_backend_impl(bundle_root: &str, data_dir: &str, port: u16) {
     let resource_dir = if !bundle_root.is_empty() {
         PathBuf::from(bundle_root).join("Contents/Resources")
     } else {
-        PathBuf::from("Contents/Resources")
+        // Dev mode: fallback to current working directory
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     };
     let script = resource_dir.join("scripts/start_mac.sh");
 
