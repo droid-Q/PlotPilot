@@ -58,7 +58,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: plotpilot-arm64
-          path: frontend/src-tauri/target/release/bundle/macho/PlotPilot.app
+          path: frontend/src-tauri/target/release/bundle/macos/PlotPilot.app
           retention-days: 5
 
   build-intel:
@@ -101,7 +101,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: plotpilot-x86_64
-          path: frontend/src-tauri/target/release/bundle/macho/PlotPilot.app
+          path: frontend/src-tauri/target/release/bundle/macos/PlotPilot.app
           retention-days: 5
 
   combine:
@@ -114,13 +114,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: plotpilot-arm64
-          path: arm64/PlotPilot.app/Contents/MacOS
+          path: arm64
 
       - name: Download x86_64 .app
         uses: actions/download-artifact@v4
         with:
           name: plotpilot-x86_64
-          path: intel/PlotPilot.app/Contents/MacOS
+          path: intel
 
       - name: Combine Rust binaries with lipo
         run: |
