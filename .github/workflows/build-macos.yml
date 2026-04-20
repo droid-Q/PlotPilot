@@ -48,8 +48,8 @@ jobs:
           cp -R python_macos frontend/src-tauri/
 
       - name: Build Tauri (aarch64)
-        run: npm run tauri:build
-        working-directory: frontend
+        run: |
+          cd frontend && npm run tauri:build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUSTFLAGS: "-C link-arg=-mmacosx-version-min=10.15"
@@ -91,8 +91,8 @@ jobs:
           cp -R python_macos frontend/src-tauri/
 
       - name: Build Tauri (x86_64)
-        run: npm run tauri:build
-        working-directory: frontend
+        run: |
+          cd frontend && npm run tauri:build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUSTFLAGS: "-C link-arg=-mmacosx-version-min=10.15"
