@@ -110,53 +110,37 @@ fn search_proj_root_upward(start_dir: &std::path::Path) -> Option<PathBuf> {
 #[cfg(target_os = "macos")]
 fn launch_mac_backend_impl(bundle_root: &str, data_dir: &str, port: u16) {
     // macOS bundle 结构: PlotPilot.app/Contents/Resources/
-    // Python 代码和脚本都在 Resources/ 下
+    // Dev 模式: bundle_root 是项目根目录，resource_dir 就是项目根
     let resource_dir = if !bundle_root.is_empty() {
-        PathBuf::from(bundle_root).join("Contents/Resources")
+        let res_path = PathBuf::from(bundle_root).join("Contents/Resources");
+        if res_path.exists() {
+            // 真正的 .app bundle
+            res_path
+        } else {
+            // Dev 模式: bundle_root 就是项目根
+            PathBuf::from(bundle_root)
+        }
     } else {
-        // Dev mode: fallback to current working directory
+        // Fallback: 当前工作目录
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     };
-    let script = resource_dir.join("scripts/start_mac.sh");
-
-    if script.exists() {
-        // 通过环境变量传递 resource_dir（避免增加命令行参数）
-        let mut cmd = Command::new("/bin/bash");
-        cmd.arg(&script);
-        cmd.arg(port.to_string());
-        cmd.arg(data_dir);
-        cmd.arg(bundle_root);
-        cmd.env("PLOTPILOT_RESOURCE_DIR", &resource_dir);
-        cmd.env("AITEXT_PROD_DATA_DIR", data_dir);
-        cmd.env("PYTHONPATH", &resource_dir);
-        cmd.env("PYTHONIOENCODING", "utf-8");
-        cmd.env("PYTHONUNBUFFERED", "1");
-        cmd.env("HF_HUB_OFFLINE", "1");
-        cmd.env("TRANSFORMERS_OFFLINE", "1");
-        let _ = cmd.spawn();
-        println!("[PlotPilot] Backend launch script: {:?}", script);
-    } else {
-        eprintln!(
-            "[PlotPilot] Backend script not found: {:?}, falling back to python3",
-            script
-        );
-        // Fallback: 直接调用 python3，PYTHONPATH 指向 Resources
-        let mut cmd = Command::new("python3");
-        cmd.arg("-m");
-        cmd.arg("uvicorn");
-        cmd.arg("interfaces.main:app");
-        cmd.arg("--host");
-        cmd.arg("127.0.0.1");
-        cmd.arg("--port");
-        cmd.arg(port.to_string());
-        cmd.env("AITEXT_PROD_DATA_DIR", data_dir);
-        cmd.env("PYTHONPATH", &resource_dir);
-        cmd.env("PYTHONIOENCODING", "utf-8");
-        cmd.env("PYTHONUNBUFFERED", "1");
-        cmd.env("HF_HUB_OFFLINE", "1");
-        cmd.env("TRANSFORMERS_OFFLINE", "1");
-        let _ = cmd.spawn();
-    }
+    // 直接调用 python3 启动后端
+    let mut cmd = Command::new("python3");
+    cmd.arg("-m");
+    cmd.arg("uvicorn");
+    cmd.arg("interfaces.main:app");
+    cmd.arg("--host");
+    cmd.arg("127.0.0.1");
+    cmd.arg("--port");
+    cmd.arg(port.to_string());
+    cmd.env("AITEXT_PROD_DATA_DIR", data_dir);
+    cmd.env("PYTHONPATH", &resource_dir);
+    cmd.env("PYTHONIOENCODING", "utf-8");
+    cmd.env("PYTHONUNBUFFERED", "1");
+    cmd.env("HF_HUB_OFFLINE", "1");
+    cmd.env("TRANSFORMERS_OFFLINE", "1");
+    let _ = cmd.spawn();
+    println!("[PlotPilot] Backend started with python3");
 }
 
 #[cfg(target_os = "windows")]
