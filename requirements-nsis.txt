@@ -1,15 +1,8 @@
 # ════════════════════════════════════════════
-# aitext — 核心依赖（轻量级，秒级安装）
+# NSIS / Tauri 安装包专用：运行时依赖（不含测试包）
 # ════════════════════════════════════════════
-#
-# 用法: pip install -r requirements.txt
-#
-# 仅包含运行核心功能所需的最小依赖集。
-# 本地向量模型（sentence-transformers / torch / faiss）
-# 已拆分到 requirements-local.txt，按需安装。
-#
-# 安装完本文件后即可启动服务，使用 OpenAI API 模式。
-# ════════════════════════════════════════════
+# 构建脚本会将本文件安装进内嵌 Python（embed），与 requirements.txt
+# 功能一致，体积更小、安装更快。
 
 # ── Web 框架 ──
 fastapi>=0.109.0
@@ -37,7 +30,3 @@ python-docx>=1.1.0
 ebooklib>=0.18
 lxml>=4.9.0
 fpdf2>=2.7.0
-
-# ── 测试（开发用） ──
-pytest>=7.0,<9.0
-pytest-asyncio>=0.23,<1.0

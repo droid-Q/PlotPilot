@@ -200,11 +200,12 @@ async def get_autopilot_status(novel_id: str):
     twpc = getattr(novel, "target_words_per_chapter", None) or 2500
 
     lacn = getattr(novel, "last_audit_chapter_number", None)
+    last_tension = int(getattr(novel, "last_chapter_tension", 0) or 0)
     last_chapter_audit = None
     if lacn is not None:
         last_chapter_audit = {
             "chapter_number": int(lacn),
-            "tension": int(getattr(novel, "last_chapter_tension", 0) or 0),
+            "tension": last_tension,
             "drift_alert": bool(getattr(novel, "last_audit_drift_alert", False)),
             "similarity_score": getattr(novel, "last_audit_similarity", None),
             "narrative_sync_ok": bool(getattr(novel, "last_audit_narrative_ok", True)),
@@ -228,7 +229,7 @@ async def get_autopilot_status(novel_id: str):
         "target_chapters": novel.target_chapters,
         "target_words_per_chapter": twpc,
         "target_plan_total_words": target * twpc,
-        "last_chapter_tension": getattr(novel, "last_chapter_tension", 0),
+        "last_chapter_tension": last_tension,
         "consecutive_error_count": getattr(novel, "consecutive_error_count", 0),
         "total_words": total_words,
         "completed_chapters": len(completed),
@@ -530,6 +531,19 @@ async def autopilot_log_stream(
                     act_display = (novel.current_act or 0) + 1
                     tw = int(total_words) if total_words else 0
                     beat_1based = int(current_beat) + 1
+                    current_chapter_number = None
+                    try:
+                        if drafts:
+                            _wc2 = lambda c: c.word_count.value if hasattr(c.word_count, "value") else (c.word_count or 0)
+                            active2 = [c for c in drafts if _wc2(c) > 0]
+                            current_chapter_number = (
+                                max(int(c.number) for c in active2) if active2
+                                else min(int(c.number) for c in drafts)
+                            )
+                        elif completed:
+                            current_chapter_number = max(int(c.number) for c in completed) + 1
+                    except Exception:
+                        current_chapter_number = None
                     progress_event = {
                         "type": "progress",
                         "message": (
@@ -760,7 +774,7 @@ async def stream_debug(novel_id: str):
             sample_msg = queue.get_nowait()
             # 把消息放回去
             queue.put(sample_msg)
-        except:
+        except Exception:
             pass
     
     return {

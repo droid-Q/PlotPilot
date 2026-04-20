@@ -1,26 +1,43 @@
 [package]
 name = "plotpilot"
-version = "1.0.1"
-description = "PlotPilot · 墨枢 - AI驱动的长篇创意写作平台"
+version = "1.0.2"
+description = "PlotPilot（墨枢）· AI 小说创作平台"
 authors = ["PlotPilot Team"]
 license = "MIT"
 repository = "https://github.com/your-repo/PlotPilot"
 edition = "2021"
 rust-version = "1.77.2"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
+# Tauri 不需要 bin 类型，我们用 lib + cdylib
 [lib]
 name = "plotpilot_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
-[build-dependencies]
-tauri-build = { version = "2.5.6", features = [] }
+crate-type = ["lib", "cdylib", "staticlib"]
 
 [dependencies]
-serde_json = "1.0"
-serde = { version = "1.0", features = ["derive"] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-shell = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
 log = "0.4"
+env_logger = "0.11"
+which = "7"
+dirs = "6"
+ureq = "3"
+webbrowser = "1"
+zip = "2.1"
+
+[target.'cfg(windows)'.dependencies]
+win32job = "2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
 tauri = { version = "2.10.3", features = [] }
-tauri-plugin-log = "2"
-dirs = "5"
+opt-level = "s"
+strip = true

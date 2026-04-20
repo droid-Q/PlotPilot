@@ -1,7 +1,7 @@
 # PlotPilot（墨枢）
 
 <p align="center">
-  <img src="docs/plotpilot-readme.png" alt="PlotPilot 墨枢" width="480" />
+  <img src="docs/plotpilot-readme.256.png" alt="PlotPilot 墨枢" width="480" />
 </p>
 
 > AI 驱动的长篇创作平台 — 自动驾驶生成、知识图谱管理、风格分析一体化。
@@ -19,7 +19,7 @@
 - **伏笔台账**：追踪并自动闭合叙事钩子。
 - **风格分析**：作者声音漂移检测与文体指纹。
 - **节拍表与故事结构**：三幕式、章节节拍规划。
-- **DDD 四层架构**：`domain` / `application` / `infrastructure` / `interfaces`。
+- **DDD 四层架构**：`domain` / `application` / `infrastructure` / `interfaces`
 
 ---
 
@@ -50,8 +50,9 @@
 
 ## 桌面安装版（Windows · Tauri）
 
-- **下载**：[GitHub Releases](https://github.com/shenminglinyi/PlotPilot/releases)（当前线：`PlotPilot_*_x64-setup.exe`，NSIS）
-- **说明**：安装包内含冻结后端，无需单独装 Python；详细构建说明见 `[docs/BUILD_INSTALLER.md](docs/BUILD_INSTALLER.md)`。
+- **当前版本**：[v1.0.2](https://github.com/shenminglinyi/PlotPilot/releases/tag/v1.0.2) · 安装包：[`PlotPilot_1.0.2_x64-setup.exe`](https://github.com/shenminglinyi/PlotPilot/releases/download/v1.0.2/PlotPilot_1.0.2_x64-setup.exe)（NSIS）
+- **全部发行版**：[GitHub Releases](https://github.com/shenminglinyi/PlotPilot/releases)
+- **说明**：安装包内含冻结后端，无需单独装 Python；构建流程见 [docs/BUILD_INSTALLER.md](docs/BUILD_INSTALLER.md)。
 
 ---
 
