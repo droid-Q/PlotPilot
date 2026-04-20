@@ -28,8 +28,11 @@ jobs:
 
       - name: Download Python ${{ env.PYTHON_VERSION }} (aarch64)
         run: |
-          curl -L "${{ env.PYTHON_MACOS_BASE }}/${{ env.PYTHON_TAG }}/cpython-${{ env.PYTHON_VERSION }}+${{ env.PYTHON_TAG }}-aarch64-apple-darwin-install_only.tar.gz" \
+          curl -fL "${{ env.PYTHON_MACOS_BASE }}/${{ env.PYTHON_TAG }}/SHA256SUMS" -o /tmp/python_SHA256SUMS
+          curl -fL "${{ env.PYTHON_MACOS_BASE }}/${{ env.PYTHON_TAG }}/cpython-${{ env.PYTHON_VERSION }}+${{ env.PYTHON_TAG }}-aarch64-apple-darwin-install_only.tar.gz" \
             -o /tmp/python_aarch64.tar.gz
+          EXPECTED=$(grep "cpython-${{ env.PYTHON_VERSION }}+${{ env.PYTHON_TAG }}-aarch64-apple-darwin-install_only.tar.gz" /tmp/python_SHA256SUMS | cut -d' ' -f1)
+          echo "$EXPECTED /tmp/python_aarch64.tar.gz" | sha256sum -c -
           mkdir -p python_macos/aarch64
           tar -xzf /tmp/python_aarch64.tar.gz -C python_macos/aarch64 --strip-components=1
 
@@ -98,8 +101,11 @@ jobs:
 
       - name: Download Python ${{ env.PYTHON_VERSION }} (x86_64)
         run: |
-          curl -L "${{ env.PYTHON_MACOS_BASE }}/${{ env.PYTHON_TAG }}/cpython-${{ env.PYTHON_VERSION }}+${{ env.PYTHON_TAG }}-x86_64-apple-darwin-install_only.tar.gz" \
+          curl -fL "${{ env.PYTHON_MACOS_BASE }}/${{ env.PYTHON_TAG }}/SHA256SUMS" -o /tmp/python_SHA256SUMS
+          curl -fL "${{ env.PYTHON_MACOS_BASE }}/${{ env.PYTHON_TAG }}/cpython-${{ env.PYTHON_VERSION }}+${{ env.PYTHON_TAG }}-x86_64-apple-darwin-install_only.tar.gz" \
             -o /tmp/python_x86_64.tar.gz
+          EXPECTED=$(grep "cpython-${{ env.PYTHON_VERSION }}+${{ env.PYTHON_TAG }}-x86_64-apple-darwin-install_only.tar.gz" /tmp/python_SHA256SUMS | cut -d' ' -f1)
+          echo "$EXPECTED /tmp/python_x86_64.tar.gz" | sha256sum -c -
           mkdir -p python_macos/x86_64
           tar -xzf /tmp/python_x86_64.tar.gz -C python_macos/x86_64 --strip-components=1
 
