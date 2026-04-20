@@ -22,7 +22,6 @@
         "decorations": true,
         "resizable": true,
         "fullscreen": false
-        "center": true
       }
     ],
     "security": {
@@ -47,14 +46,10 @@
       "../../out/tauri/plotpilot-backend/": "plotpilot-backend/"
     },
     "windows": {
-      "../../interfaces": "interfaces",
       "webviewInstallMode": {
         "type": "embedBootstrapper"
       },
       "certificateThumbprint": null,
-      "../../infrastructure": "infrastructure",
-      "../../domain": "domain",
-      "../../scripts/start_mac.sh": "scripts/start_mac.sh",
       "digestAlgorithm": "sha256",
       "timestampUrl": "",
       "nsis": {
