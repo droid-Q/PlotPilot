@@ -153,3 +153,4 @@ mcps/
 *.orig
 *.rej
 /.idea/
+/frontend/src-tauri/Cargo.lock
