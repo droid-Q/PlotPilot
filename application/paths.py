@@ -12,10 +12,8 @@ _MEIPASS = getattr(sys, "_MEIPASS", None) if _FROZEN else None
 # application/paths.py → 仓库根目录 aitext/
 # 冻结时 __file__ 在 sys._MEIPASS 内，parent/parent 指向 bundle 根
 if _FROZEN and _MEIPASS:
-    # _MEIPASS = bundle/Resources/（mac）或 bundle/（windows）
-    # 仓库根 = bundle 的上一级（bundle 本身就是仓库根）
-    _bundle_root = Path(_MEIPASS).parent
-    AITEXT_ROOT = _bundle_root
+    # _MEIPASS = bundle Resources 根目录，bundle 本身就是仓库根
+    AITEXT_ROOT = Path(_MEIPASS)
 else:
     AITEXT_ROOT = Path(__file__).resolve().parents[1]
 
