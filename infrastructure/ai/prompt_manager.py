@@ -22,9 +22,39 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 # 内置种子 JSON 路径
+# 生产版(AITEXT_PROD_DATA_DIR): 从数据目录加载
+# 开发版: 从源码目录加载
 _DEFAULT_SEED_PATH = (
     Path(__file__).resolve().parent / "prompts" / "prompts_defaults.json"
 )
+
+
+def _get_seed_path() -> Path:
+    """获取种子文件路径，打包后优先从数据目录或 bundle 资源目录读取。
+
+    优先级：
+    1. DATA_DIR/prompts/          — 首次启动时从 bundle 复制过来的位置
+    2. sys._MEIPASS 打包资源       — PyInstaller freeze 时的 bundle 目录
+    3. 源码目录（开发用）           — fallback
+    """
+    import os, sys
+    from application.paths import DATA_DIR
+
+    # 1. 数据目录（生产环境首选）
+    if os.getenv("AITEXT_PROD_DATA_DIR"):
+        prod_path = DATA_DIR / "prompts" / "prompts_defaults.json"
+        if prod_path.exists():
+            return prod_path
+
+    # 2. PyInstaller bundle 资源目录（冻结后 infrastructure/ 在此路径下）
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        meipass = Path(sys._MEIPASS)
+        bundled = meipass / "infrastructure" / "ai" / "prompts" / "prompts_defaults.json"
+        if bundled.exists():
+            return bundled
+
+    # 3. 源码目录（开发环境）
+    return _DEFAULT_SEED_PATH
 
 # 分类定义（与 prompts_defaults.json 的 categories 对应）
 BUILTIN_CATEGORIES = [
@@ -316,7 +346,7 @@ class PromptManager:
             logger.info("PromptManager: 内置种子已存在，跳过初始化")
             return True
 
-        seed_path = _DEFAULT_SEED_PATH
+        seed_path = _get_seed_path()
         if not seed_path.exists():
             logger.warning("内置种子文件不存在: %s", seed_path)
             return False

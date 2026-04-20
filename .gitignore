@@ -112,6 +112,9 @@ base_library.zip
 /tools/aitext/
 # tools/python-*.zip       # ← 保留！Python embed 原始包（~15MB），入库供用户直接用
 
+# ── CI 构建时下载的 macOS 内嵌 Python（不入库） ──
+python_macos/
+
 # ── 临时 / 无关文件 ──
 =++Contribution Value Roster++=
 
@@ -150,3 +153,4 @@ mcps/
 *.rs.bk
 *.orig
 *.rej
+/.idea/

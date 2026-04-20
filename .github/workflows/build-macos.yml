@@ -1,0 +1,167 @@
+name: Build macOS (arm64 + x86_64)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12.13"
+  PYTHON_TAG: "20260414"
+  PYTHON_MACOS_BASE: "https://github.com/astral-sh/python-build-standalone/releases/download"
+
+jobs:
+  build-arm64:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        run: |
+          rustup set_osx_minimum_deployment_target 10.15
+          rustup default stable
+
+      - name: Download Python ${{ env.PYTHON_VERSION }} (aarch64)
+        run: |
+          curl -L "${{ env.PYTHON_MACOS_BASE }}/${{ env.PYTHON_TAG }}/cpython-${{ env.PYTHON_VERSION }}+${{ env.PYTHON_TAG }}-aarch64-apple-darwin-install_only.tar.gz" \
+            -o /tmp/python_aarch64.tar.gz
+          mkdir -p python_macos/aarch64
+          tar -xzf /tmp/python_aarch64.tar.gz -C python_macos/aarch64 --strip-components=1
+
+      - name: Install pip packages (aarch64)
+        run: |
+          python_macos/aarch64/bin/python3 -m ensurepip --upgrade
+          python_macos/aarch64/bin/pip install --upgrade pip
+          python_macos/aarch64/bin/pip install -r requirements.txt
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Inject Python runtime into frontend for bundling
+        run: |
+          # Copy embedded Python into frontend/src-tauri/ for tauri to bundle
+          cp -R python_macos frontend/src-tauri/
+
+      - name: Build Tauri (aarch64)
+        run: npm run tauri:build
+        working-directory: frontend
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload arm64 .app
+        uses: actions/upload-artifact@v4
+        with:
+          name: plotpilot-arm64
+          path: frontend/src-tauri/target/release/bundle/macho/PlotPilot.app
+          retention-days: 5
+
+  build-intel:
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        run: |
+          rustup set_osx_minimum_deployment_target 10.15
+          rustup default stable
+
+      - name: Download Python ${{ env.PYTHON_VERSION }} (x86_64)
+        run: |
+          curl -L "${{ env.PYTHON_MACOS_BASE }}/${{ env.PYTHON_TAG }}/cpython-${{ env.PYTHON_VERSION }}+${{ env.PYTHON_TAG }}-x86_64-apple-darwin-install_only.tar.gz" \
+            -o /tmp/python_x86_64.tar.gz
+          mkdir -p python_macos/x86_64
+          tar -xzf /tmp/python_x86_64.tar.gz -C python_macos/x86_64 --strip-components=1
+
+      - name: Install pip packages (x86_64)
+        run: |
+          python_macos/x86_64/bin/python3 -m ensurepip --upgrade
+          python_macos/x86_64/bin/pip install --upgrade pip
+          python_macos/x86_64/bin/pip install -r requirements.txt
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Inject Python runtime into frontend for bundling
+        run: |
+          cp -R python_macos frontend/src-tauri/
+
+      - name: Build Tauri (x86_64)
+        run: npm run tauri:build
+        working-directory: frontend
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload x86_64 .app
+        uses: actions/upload-artifact@v4
+        with:
+          name: plotpilot-x86_64
+          path: frontend/src-tauri/target/release/bundle/macho/PlotPilot.app
+          retention-days: 5
+
+  combine:
+    needs: [build-arm64, build-intel]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download arm64 .app
+        uses: actions/download-artifact@v4
+        with:
+          name: plotpilot-arm64
+          path: arm64/PlotPilot.app/Contents/MacOS
+
+      - name: Download x86_64 .app
+        uses: actions/download-artifact@v4
+        with:
+          name: plotpilot-x86_64
+          path: intel/PlotPilot.app/Contents/MacOS
+
+      - name: Combine Rust binaries with lipo
+        run: |
+          cp arm64/PlotPilot.app/Contents/MacOS/PlotPilot arm64_binary
+          cp intel/PlotPilot.app/Contents/MacOS/PlotPilot intel_binary
+          lipo -create -output universal_binary arm64_binary intel_binary
+          ls -lh universal_binary
+          cp universal_binary arm64/PlotPilot.app/Contents/MacOS/PlotPilot
+
+      - name: Bundle both Python runtimes into universal app
+        run: |
+          # The arm64 app already has aarch64 Python bundled by CI
+          # We need to also add x86_64 Python to it
+          # Copy x86_64 Python into the arm64 app's Resources
+          cp -R intel/PlotPilot.app/Contents/Resources/python_macos \
+             arm64/PlotPilot.app/Contents/Resources/python_macos_x86_64
+
+          # Verify structure
+          ls arm64/PlotPilot.app/Contents/Resources/
+
+      - name: Re-sign for universal
+        run: |
+          # Note: requires Apple certificate configured in GitHub Actions
+          # For local builds: codesign -f -s - "PlotPilot.app"
+          if [ -n "$CODESIGN_IDENTITY" ]; then
+            codesign -f -s "$CODESIGN_IDENTITY" arm64/PlotPilot.app || true
+          fi
+
+      - name: Create DMG (universal)
+        run: |
+          DMG_PATH="PlotPilot-macos-universal.dmg"
+          TEMP_DIR=$(mktemp -d)
+          cp -R arm64/PlotPilot.app "$TEMP_DIR/"
+          hdiutil create -volname "PlotPilot" -fs HFS+ -srcfolder "$TEMP_DIR" -ov -format UDZO "$DMG_PATH"
+          ls -lh "$DMG_PATH"
+
+      - name: Upload universal DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: plotpilot-macos-universal-dmg
+          path: PlotPilot-macos-universal.dmg
+          retention-days: 5

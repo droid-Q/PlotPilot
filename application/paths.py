@@ -2,10 +2,22 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
+# ── frozen 模式检测（PyInstaller / Tauri bundle） ──────────────────────────
+_FROZEN = getattr(sys, "frozen", False)
+_MEIPASS = getattr(sys, "_MEIPASS", None) if _FROZEN else None
+
 # application/paths.py → 仓库根目录 aitext/
-AITEXT_ROOT = Path(__file__).resolve().parents[1]
+# 冻结时 __file__ 在 sys._MEIPASS 内，parent/parent 指向 bundle 根
+if _FROZEN and _MEIPASS:
+    # _MEIPASS = bundle/Resources/（mac）或 bundle/（windows）
+    # 仓库根 = bundle 的上一级（bundle 本身就是仓库根）
+    _bundle_root = Path(_MEIPASS).parent
+    AITEXT_ROOT = _bundle_root
+else:
+    AITEXT_ROOT = Path(__file__).resolve().parents[1]
 
 # 环境变量名：由 Tauri 生产构建在启动 Python 子进程时注入，指向用户可写目录（如 AppData）
 AITEXT_PROD_DATA_DIR_ENV = "AITEXT_PROD_DATA_DIR"
