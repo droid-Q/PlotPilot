@@ -188,19 +188,22 @@ fn launch_windows_backend_impl(bundle_root: &str, data_dir: &str, port: u16) {
 
 #[cfg(target_os = "linux")]
 fn launch_linux_backend_impl(bundle_root: &str, data_dir: &str, port: u16) {
-    let _ = Command::new("python3")
-        .arg("-m")
-        .arg("uvicorn")
-        .arg("interfaces.main:app")
-        .arg("--host")
-        .arg("127.0.0.1")
-        .arg("--port")
-        .arg(port.to_string())
-        .env("AITEXT_PROD_DATA_DIR", data_dir)
-        .env("PYTHONIOENCODING", "utf-8")
-        .env("HF_HUB_OFFLINE", "1")
-        .env("TRANSFORMERS_OFFLINE", "1")
-        .spawn();
+    let mut cmd = Command::new("python3");
+    cmd.arg("-m");
+    cmd.arg("uvicorn");
+    cmd.arg("interfaces.main:app");
+    cmd.arg("--host");
+    cmd.arg("127.0.0.1");
+    cmd.arg("--port");
+    cmd.arg(port.to_string());
+    cmd.env("AITEXT_PROD_DATA_DIR", data_dir);
+    cmd.env("PYTHONIOENCODING", "utf-8");
+    cmd.env("HF_HUB_OFFLINE", "1");
+    cmd.env("TRANSFORMERS_OFFLINE", "1");
+    if !bundle_root.is_empty() {
+        cmd.env("PYTHONPATH", bundle_root);
+    }
+    let _ = cmd.spawn();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
