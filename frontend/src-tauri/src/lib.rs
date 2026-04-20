@@ -245,5 +245,6 @@ fn find_free_port(start: u16, max_try: u16) -> u16 {
             return port;
         }
     }
+    eprintln!("[PlotPilot] Warning: No free port in range {}-{}, falling back to {}", start, start.saturating_add(max_try), start);
     start
 }
