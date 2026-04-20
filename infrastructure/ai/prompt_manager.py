@@ -37,11 +37,10 @@ def _get_seed_path() -> Path:
     2. sys._MEIPASS 打包资源       — PyInstaller freeze 时的 bundle 目录
     3. 源码目录（开发用）           — fallback
     """
-    import os, sys
-    from application.paths import DATA_DIR
-
     # 1. 数据目录（生产环境首选）
     if os.getenv("AITEXT_PROD_DATA_DIR"):
+        from application.paths import DATA_DIR
+
         prod_path = DATA_DIR / "prompts" / "prompts_defaults.json"
         if prod_path.exists():
             return prod_path
