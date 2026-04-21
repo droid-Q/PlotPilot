@@ -107,89 +107,55 @@ fn search_proj_root_upward(start_dir: &std::path::Path) -> Option<PathBuf> {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 检测 CPU 架构，返回 "aarch64" 或 "x86_64"
-#[cfg(target_os = "macos")]
-fn detect_mac_arch() -> String {
-    let arch = std::process::Command::new("uname")
-        .arg("-m")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-    if arch == "arm64" {
-        "aarch64".to_string()
-    } else {
-        "x86_64".to_string()
-    }
-}
-
-/// 在 macOS bundle 中查找 Python 可执行文件
-/// 优先级: 1) bundle 内嵌 Python, 2) 系统 python3
-#[cfg(target_os = "macos")]
-fn find_mac_python(resource_dir: &PathBuf) -> String {
-    let arch = detect_mac_arch();
-
-    // 1) 尝试 bundle 内嵌 Python
-    let embedded_py = resource_dir
-        .join("python_macos")
-        .join(&arch)
-        .join("bin")
-        .join("python3");
-
-    if embedded_py.exists() {
-        // 验证 uvicorn 可用
-        let check = std::process::Command::new(&embedded_py)
-            .args(["-c", "import uvicorn"])
-            .output();
-        if check.is_ok() {
-            println!("[PlotPilot] Using bundled Python: {:?}", embedded_py);
-            return embedded_py.to_string_lossy().into_owned();
-        }
-    }
-
-    // 2) 降级到系统 python3
-    println!("[PlotPilot] Falling back to system python3");
-    "python3".to_string()
-}
-
 #[cfg(target_os = "macos")]
 fn launch_mac_backend_impl(bundle_root: &str, data_dir: &str, port: u16) {
     // macOS bundle 结构: PlotPilot.app/Contents/Resources/
-    // Dev 模式: bundle_root 是项目根目录，resource_dir 就是项目根
+    // Python 代码和脚本都在 Resources/ 下
     let resource_dir = if !bundle_root.is_empty() {
-        let res_path = PathBuf::from(bundle_root).join("Contents/Resources");
-        if res_path.exists() {
-            // 真正的 .app bundle
-            res_path
-        } else {
-            // Dev 模式: bundle_root 就是项目根
-            PathBuf::from(bundle_root)
-        }
+        PathBuf::from(bundle_root).join("Contents/Resources")
     } else {
-        // Fallback: 当前工作目录
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        PathBuf::from("Contents/Resources")
     };
+    let script = resource_dir.join("scripts/start_mac.sh");
 
-    // 查找 Python 可执行文件
-    let python_exe = find_mac_python(&resource_dir);
-
-    let mut cmd = Command::new(&python_exe);
-    cmd.arg("-m");
-    cmd.arg("uvicorn");
-    cmd.arg("interfaces.main:app");
-    cmd.arg("--host");
-    cmd.arg("127.0.0.1");
-    cmd.arg("--port");
-    cmd.arg(port.to_string());
-    cmd.env("AITEXT_PROD_DATA_DIR", data_dir);
-    cmd.env("PYTHONPATH", resource_dir.to_string_lossy().as_ref());
-    cmd.env("PYTHONIOENCODING", "utf-8");
-    cmd.env("PYTHONUNBUFFERED", "1");
-    cmd.env("HF_HUB_OFFLINE", "1");
-    cmd.env("TRANSFORMERS_OFFLINE", "1");
-    let _ = cmd.spawn();
-    println!("[PlotPilot] Backend started with python3");
+    if script.exists() {
+        // 通过环境变量传递 resource_dir（避免增加命令行参数）
+        let mut cmd = Command::new("/bin/bash");
+        cmd.arg(&script);
+        cmd.arg(port.to_string());
+        cmd.arg(data_dir);
+        cmd.arg(bundle_root);
+        cmd.env("PLOTPILOT_RESOURCE_DIR", &resource_dir);
+        cmd.env("AITEXT_PROD_DATA_DIR", data_dir);
+        cmd.env("PYTHONPATH", &resource_dir);
+        cmd.env("PYTHONIOENCODING", "utf-8");
+        cmd.env("PYTHONUNBUFFERED", "1");
+        cmd.env("HF_HUB_OFFLINE", "1");
+        cmd.env("TRANSFORMERS_OFFLINE", "1");
+        let _ = cmd.spawn();
+        println!("[PlotPilot] Backend launch script: {:?}", script);
+    } else {
+        eprintln!(
+            "[PlotPilot] Backend script not found: {:?}, falling back to python3",
+            script
+        );
+        // Fallback: 直接调用 python3，PYTHONPATH 指向 Resources
+        let mut cmd = Command::new("python3");
+        cmd.arg("-m");
+        cmd.arg("uvicorn");
+        cmd.arg("interfaces.main:app");
+        cmd.arg("--host");
+        cmd.arg("127.0.0.1");
+        cmd.arg("--port");
+        cmd.arg(port.to_string());
+        cmd.env("AITEXT_PROD_DATA_DIR", data_dir);
+        cmd.env("PYTHONPATH", &resource_dir);
+        cmd.env("PYTHONIOENCODING", "utf-8");
+        cmd.env("PYTHONUNBUFFERED", "1");
+        cmd.env("HF_HUB_OFFLINE", "1");
+        cmd.env("TRANSFORMERS_OFFLINE", "1");
+        let _ = cmd.spawn();
+    }
 }
 
 #[cfg(target_os = "windows")]
