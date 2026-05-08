@@ -158,3 +158,6 @@ mcps/
 *.orig
 *.rej
 .idea
+.gitnexus
+/AGENTS.md
+/CLAUDE.md
