@@ -130,6 +130,8 @@ frontend/src-tauri/target/
 frontend/src-tauri/Cargo.lock
 frontend/src-tauri/scripts/
 frontend/src-tauri/tools/
+frontend/src-tauri/python_macos/*
+!frontend/src-tauri/python_macos/.gitkeep
 
 # ── 仅本机 Windows 打包链路（协作者只需 npm run dev + 后端） ──
 scripts/build_installer.py

@@ -30,9 +30,6 @@
   },
   "bundle": {
     "active": true,
-    "targets": [
-      "nsis"
-    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -40,26 +37,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": {
-      "../../out/tauri/plotpilot-backend/": "plotpilot-backend/"
-    },
-    "windows": {
-      "webviewInstallMode": {
-        "type": "embedBootstrapper"
-      },
-      "certificateThumbprint": null,
-      "digestAlgorithm": "sha256",
-      "timestampUrl": "",
-      "nsis": {
-        "displayLanguageSelector": false,
-        "installerIcon": "icons/icon.ico",
-        "installMode": "both",
-        "languages": [
-          "SimpChinese",
-          "English"
-        ]
-      }
-    },
     "shortDescription": "AI 驱动的智能小说创作平台",
     "longDescription": "PlotPilot（墨枢）是一款 AI 驱动的智能小说创作平台，提供剧情分析、角色管理、AI 续写等专业功能。",
     "category": "Productivity",

@@ -1,0 +1,22 @@
+{
+  "bundle": {
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "resources": {
+      "../../application/": "application/",
+      "../../domain/": "domain/",
+      "../../infrastructure/": "infrastructure/",
+      "../../interfaces/": "interfaces/",
+      "../../scripts/start_daemon.py": "scripts/start_daemon.py",
+      "../../scripts/start_mac.sh": "scripts/start_mac.sh",
+      "../../load_env.py": "load_env.py",
+      "../../requirements.txt": "requirements.txt",
+      "python_macos/": "python_macos/"
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  }
+}

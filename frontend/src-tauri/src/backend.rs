@@ -199,6 +199,11 @@ impl BackendManager {
     pub(crate) fn find_python(&self) -> Option<PathBuf> {
         // 优先级：已解压的内嵌 Python > 资源目录中的内嵌 Python > 虚拟环境 > 系统 PATH
 
+        #[cfg(target_os = "macos")]
+        if let Some(python) = self.find_bundled_macos_python() {
+            return Some(python);
+        }
+
         // 1) 检查项目目录下的内嵌 Python
         let embedded = self.project_root.join("tools/python_embed/python.exe");
         if embedded.exists() {
@@ -245,6 +250,15 @@ impl BackendManager {
             return Some(venv);
         }
 
+        #[cfg(not(target_os = "windows"))]
+        {
+            let unix_venv = self.project_root.join(".venv/bin/python");
+            if unix_venv.exists() {
+                log::info!("🐍 使用虚拟环境 Python: {}", unix_venv.display());
+                return Some(unix_venv);
+            }
+        }
+
         // 5) 系统 PATH
         if let Ok(path) = which::which("python") {
             log::info!("🐍 使用系统 Python: {}", path.display());
@@ -253,6 +267,46 @@ impl BackendManager {
         if let Ok(path) = which::which("python3") {
             log::info!("🐍 使用系统 python3: {}", path.display());
             return Some(path);
+        }
+
+        None
+    }
+
+    #[cfg(target_os = "macos")]
+    fn find_bundled_macos_python(&self) -> Option<PathBuf> {
+        let arch = match std::env::consts::ARCH {
+            "aarch64" => "aarch64",
+            "x86_64" => "x86_64",
+            other => {
+                log::warn!("未知 macOS CPU 架构: {}", other);
+                return None;
+            }
+        };
+
+        if let Ok(resource_dir) = self._app_handle.path().resource_dir() {
+            let bundled = resource_dir
+                .join("python_macos")
+                .join(arch)
+                .join("bin")
+                .join("python3");
+            if bundled.exists() {
+                log::info!("🐍 使用 macOS bundle 内置 Python: {}", bundled.display());
+                return Some(bundled);
+            }
+        }
+
+        let project_bundled = self
+            .project_root
+            .join("python_macos")
+            .join(arch)
+            .join("bin")
+            .join("python3");
+        if project_bundled.exists() {
+            log::info!(
+                "🐍 使用项目目录 macOS 内置 Python: {}",
+                project_bundled.display()
+            );
+            return Some(project_bundled);
         }
 
         None
@@ -632,9 +686,4 @@ impl Drop for BackendManager {
 fn windows_subsystem_flag() -> u32 {
     const CREATE_NO_WINDOW: u32 = 0x08000000;
     CREATE_NO_WINDOW
-}
-
-#[cfg(not(target_os = "windows"))]
-fn windows_subsystem_flag() -> u32 {
-    0
 }
