@@ -11,6 +11,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   PYTHON_VERSION: "3.12.13"
   PYTHON_TAG: "20260414"
@@ -163,3 +166,43 @@ jobs:
             PlotPilot-${{ env.VERSION }}-macos-x86_64.dmg
             PlotPilot-${{ env.VERSION }}-macos-x86_64.dmg.sha256
           retention-days: 5
+
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - build-arm64
+      - build-intel
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          pattern: plotpilot-*
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -lh release-artifacts
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG_NAME already exists, uploading assets..."
+            gh release upload "$TAG_NAME" release-artifacts/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            echo "Creating release $TAG_NAME..."
+            gh release create "$TAG_NAME" release-artifacts/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "PlotPilot $TAG_NAME" \
+              --generate-notes \
+              --verify-tag
+          fi
