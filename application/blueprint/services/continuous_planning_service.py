@@ -7,6 +7,8 @@ import json
 import uuid
 import logging
 import re
+import sys
+import copy
 from typing import Dict, List, Optional
 from datetime import datetime
 from json_repair import repair_json
@@ -22,10 +24,68 @@ from infrastructure.persistence.database.chapter_element_repository import Chapt
 from domain.ai.services.llm_service import LLMService, GenerationConfig
 from domain.ai.value_objects.prompt import Prompt
 from application.audit.services.macro_merge_engine import MacroMergeEngine, MergePlan, MergeConflictException
+from application.blueprint.services.chapter_book_structure_sync import (
+    collect_structure_chapter_numbers,
+    purge_chapter_book_rows_not_matching_structure,
+)
 
 logger = logging.getLogger(__name__)
 _macro_plan_progress_store: Dict[str, Dict] = {}
 _macro_plan_result_store: Dict[str, Dict] = {}
+_act_chapters_llm_stream_store: Dict[str, str] = {}
+
+
+def _macro_plan_progress_shared_key(novel_id: str) -> str:
+    """与 novel:xxx 隔离，避免与共享内存里小说载荷键冲突。"""
+    return f"macro_plan_progress:{novel_id}"
+
+
+def _get_cross_process_shared_dict():
+    """守护进程与 API 进程各有一份模块内进度 dict；跨进程观测必须走 Manager.dict。"""
+    shared = sys.modules.get("__shared_state")
+    if shared is not None:
+        return shared
+    try:
+        from interfaces.main import _get_shared_state
+
+        return _get_shared_state()
+    except Exception:
+        return None
+
+
+def _mirror_macro_plan_progress_to_shared(novel_id: str) -> None:
+    """将本进程内的宏观进度快照写入跨进程共享 dict（供 API SSE / GET progress 读取）。"""
+    prog = _macro_plan_progress_store.get(novel_id)
+    if not prog:
+        return
+    shared = _get_cross_process_shared_dict()
+    if shared is None:
+        return
+    try:
+        shared[_macro_plan_progress_shared_key(novel_id)] = copy.deepcopy(prog)
+    except Exception:
+        logger.debug(
+            "mirror macro_plan_progress to shared failed novel=%s",
+            novel_id,
+            exc_info=True,
+        )
+
+
+def get_act_chapters_llm_stream(act_id: str) -> str:
+    """幕级章节规划 LLM 流式累积文本（供 SSE 增量推送）。"""
+    return _act_chapters_llm_stream_store.get(act_id, "")
+
+
+def _reset_act_chapters_llm_stream(act_id: str) -> None:
+    _act_chapters_llm_stream_store[act_id] = ""
+
+
+def _append_act_chapters_llm_stream(act_id: str, delta: str) -> None:
+    if not delta:
+        return
+    _act_chapters_llm_stream_store[act_id] = (
+        _act_chapters_llm_stream_store.get(act_id, "") + delta
+    )
 
 
 # ======================================================================
@@ -167,6 +227,96 @@ def _extract_outer_json_value(text: str) -> str:
     return text[start:]
 
 
+_last_macro_incremental_preview_ts: Dict[str, float] = {}
+
+
+def _incremental_macro_parts_trustworthy(parts: List[Dict]) -> bool:
+    """流式预览专用：挡住 repair_json 在半截输出上生成的单字/碎片化标题。
+
+    正式落库仍走 ``_parse_llm_response``（可继续 repair）；此处只约束「提前挂载到树上的预览」。
+    """
+    if not parts:
+        return False
+    for p in parts:
+        if not isinstance(p, dict):
+            return False
+        pt = str(p.get("title") or "").strip()
+        if len(pt) == 1:
+            return False
+        for v in p.get("volumes") or []:
+            if not isinstance(v, dict):
+                return False
+            vt = str(v.get("title") or "").strip()
+            if len(vt) == 1:
+                return False
+            for a in v.get("acts") or []:
+                if not isinstance(a, dict):
+                    return False
+                at = str(a.get("title") or "").strip()
+                if len(at) == 1:
+                    return False
+    return True
+
+
+def _macro_incremental_tree_score(parts: Optional[List[Dict]]) -> int:
+    """启发式评分：标题齐全且非单字占位，说明增量 JSON 越可呈现。"""
+    if not parts:
+        return 0
+    score = 0
+    for p in parts:
+        if not isinstance(p, dict):
+            continue
+        pt = str(p.get("title") or "").strip()
+        if len(pt) > 1:
+            score += 2
+        for v in p.get("volumes") or []:
+            if not isinstance(v, dict):
+                continue
+            vt = str(v.get("title") or "").strip()
+            if len(vt) > 1:
+                score += 3
+            for a in v.get("acts") or []:
+                if isinstance(a, dict):
+                    at = str(a.get("title") or "").strip()
+                    if len(at) > 1:
+                        score += 5
+    return score
+
+
+def _try_parse_parts_from_llm_buffer(raw: str) -> Optional[List[Dict]]:
+    """尝试从未完成的 LLM 缓冲中解析出 parts。
+
+    优先严格 ``json.loads``；仅在首尾括号看似闭合时再尝试 ``repair_json``，
+    且结果必须通过 :func:`_incremental_macro_parts_trustworthy`，避免半段输出被修成乱码树。
+    """
+    if not raw or len(raw.strip()) < 40:
+        return None
+    cleaned = _sanitize_llm_json_output(raw)
+    cleaned = _extract_outer_json_value(cleaned)
+    candidates: List[str] = [cleaned]
+    tail = cleaned.rstrip()
+    if tail.endswith("}") or tail.endswith("]"):
+        try:
+            candidates.append(repair_json(cleaned))
+        except Exception:
+            pass
+    seen: set[str] = set()
+    for cand in candidates:
+        if not cand or cand in seen:
+            continue
+        seen.add(cand)
+        try:
+            data = json.loads(cand)
+            parts = data.get("parts")
+            if isinstance(parts, list) and len(parts) > 0 and isinstance(parts[0], dict):
+                if not _incremental_macro_parts_trustworthy(parts):
+                    continue
+                return parts
+        except Exception:
+            continue
+    return None
+
+
 def _repair_json_string(text: str) -> str:
     text = text.strip()
     if not text:
@@ -252,13 +402,28 @@ __all__ = ['ContinuousPlanningService', 'MergeConflictException']
 
 
 def get_macro_plan_progress(novel_id: str) -> Dict:
-    return _macro_plan_progress_store.get(novel_id, {
+    defaults = {
         "status": "idle",
         "current": 0,
         "total": 0,
         "percent": 0,
         "message": "",
-    }).copy()
+        "llm_stream_text": "",
+        "preview_parts": None,
+    }
+    shared = _get_cross_process_shared_dict()
+    if shared is not None:
+        try:
+            got = shared.get(_macro_plan_progress_shared_key(novel_id))
+            if isinstance(got, dict):
+                return copy.deepcopy(got)
+        except Exception:
+            logger.debug(
+                "read macro_plan_progress from shared failed novel=%s",
+                novel_id,
+                exc_info=True,
+            )
+    return copy.deepcopy(_macro_plan_progress_store.get(novel_id, defaults))
 
 
 def get_macro_plan_result(novel_id: str) -> Dict:
@@ -292,6 +457,26 @@ class ContinuousPlanningService:
         self.bible_service = bible_service
         self.chapter_repository = chapter_repository
 
+    # ─── CPMS 提示词获取 ───
+
+    @staticmethod
+    def _get_cpms_system(node_key: str, fallback: str = "") -> str:
+        """获取 system prompt。
+
+        CPMS: 优先从 PromptRegistry 获取（广场可编辑），
+        如果 Registry 不可用则回退到硬编码默认值。
+        """
+        try:
+            from infrastructure.ai.prompt_registry import get_prompt_registry
+            registry = get_prompt_registry()
+            system = registry.get_system(node_key)
+            if system:
+                return system
+        except Exception as exc:
+            logger.debug("PromptRegistry 不可用 (%s): %s", node_key, exc)
+
+        return fallback
+
     # ==================== 宏观规划 ====================
 
     async def generate_macro_plan(
@@ -305,6 +490,8 @@ class ContinuousPlanningService:
         start_time = time.time()
 
         logger.info(f"Generating macro plan for novel {novel_id}")
+        # 每轮生成清空流式缓冲，避免全托管未走 initialize_macro_plan_task 时与前一次输出拼接
+        self._clear_macro_llm_stream(novel_id)
         self._update_macro_progress(novel_id, status="running", current=0, total=0, message="正在准备结构规划")
 
         # 获取 Bible 信息
@@ -319,10 +506,15 @@ class ContinuousPlanningService:
                     structure_preference=structure_preference
                 )
 
-                # 调用 LLM 生成规划
+                # 调用 LLM 流式生成规划（SSE 通过 llm_stream_text 推送增量）
                 config = GenerationConfig(max_tokens=4096, temperature=0.7)
-                response = await self.llm_service.generate(prompt, config)
-                structure = self._parse_llm_response(response)
+                self._update_macro_progress(
+                    novel_id,
+                    status="running",
+                    message="模型正在输出叙事结构…",
+                )
+                raw = await self._stream_macro_llm_text(novel_id, prompt, config)
+                structure = self._parse_llm_response(raw)
             else:
                 structure = await self._generate_precise_macro_plan(
                     novel_id=novel_id,
@@ -330,6 +522,15 @@ class ContinuousPlanningService:
                     target_chapters=target_chapters,
                     structure_preference=structure_preference,
                 )
+
+            parts_n = len(structure.get("parts", [])) if isinstance(structure, dict) else 0
+            logger.debug(
+                "[MacroPlan] novel=%s generate_done parts=%d target_chapters=%s pref=%s",
+                novel_id,
+                parts_n,
+                target_chapters,
+                "free" if structure_preference is None else "precise",
+            )
 
             # 评估规划质量
             elapsed_time = time.time() - start_time
@@ -341,6 +542,7 @@ class ContinuousPlanningService:
             )
 
             logger.info(f"[MacroPlanQuality] novel={novel_id}, time={elapsed_time:.2f}s, metrics={quality_metrics}")
+            self._set_macro_preview_parts(novel_id, structure.get("parts", []) or [])
             self._update_macro_progress(
                 novel_id,
                 status="completed",
@@ -391,8 +593,8 @@ class ContinuousPlanningService:
             max_tokens=self._calculate_precise_max_tokens(structure_preference),
             temperature=0.7,
         )
-        response = await self.llm_service.generate(prompt, config)
-        updates = self._parse_llm_response(response)
+        raw = await self._stream_macro_llm_text(novel_id, prompt, config)
+        updates = self._parse_llm_response(raw)
         self._merge_precise_structure_updates(
             skeleton=skeleton,
             updates=updates,
@@ -419,8 +621,14 @@ class ContinuousPlanningService:
                 max_tokens=self._calculate_precise_repair_max_tokens(incomplete_acts),
                 temperature=0.5,
             )
-            repair_response = await self.llm_service.generate(repair_prompt, repair_config)
-            repair_updates = self._parse_llm_response(repair_response)
+            self._clear_macro_llm_stream(novel_id)
+            self._update_macro_progress(
+                novel_id,
+                status="running",
+                message="模型正在补全缺失字段…",
+            )
+            repair_raw = await self._stream_macro_llm_text(novel_id, repair_prompt, repair_config)
+            repair_updates = self._parse_llm_response(repair_raw)
             self._merge_precise_structure_updates(
                 skeleton=skeleton,
                 updates=repair_updates,
@@ -636,6 +844,8 @@ class ContinuousPlanningService:
             "total": 0,
             "percent": 0,
             "message": "",
+            "llm_stream_text": "",
+            "preview_parts": None,
         }).copy()
         progress["status"] = status
         if current is not None:
@@ -648,6 +858,138 @@ class ContinuousPlanningService:
         if message is not None:
             progress["message"] = message
         _macro_plan_progress_store[novel_id] = progress
+        _mirror_macro_plan_progress_to_shared(novel_id)
+
+    def _clear_macro_llm_stream(self, novel_id: str) -> None:
+        prog = _macro_plan_progress_store.get(novel_id)
+        if not prog:
+            return
+        prog = prog.copy()
+        prog["llm_stream_text"] = ""
+        prog["preview_parts"] = None
+        _macro_plan_progress_store[novel_id] = prog
+        _mirror_macro_plan_progress_to_shared(novel_id)
+
+    def _append_macro_llm_stream(self, novel_id: str, delta: str) -> None:
+        if not delta:
+            return
+        prog = _macro_plan_progress_store.get(novel_id, {
+            "status": "idle",
+            "current": 0,
+            "total": 0,
+            "percent": 0,
+            "message": "",
+            "llm_stream_text": "",
+            "preview_parts": None,
+        }).copy()
+        prog["llm_stream_text"] = (prog.get("llm_stream_text") or "") + delta
+        _macro_plan_progress_store[novel_id] = prog
+        _mirror_macro_plan_progress_to_shared(novel_id)
+        self._maybe_incremental_macro_preview_from_stream(novel_id)
+
+    def _set_macro_preview_parts(self, novel_id: str, parts: List[Dict]) -> None:
+        """解析完成后暂存部/卷/幕列表，供全托管 SSE 旁路监听端逐节点推送。"""
+        prog = _macro_plan_progress_store.get(novel_id, {
+            "status": "idle",
+            "current": 0,
+            "total": 0,
+            "percent": 0,
+            "message": "",
+            "llm_stream_text": "",
+            "preview_parts": None,
+        }).copy()
+        prog["preview_parts"] = parts
+        _macro_plan_progress_store[novel_id] = prog
+        _mirror_macro_plan_progress_to_shared(novel_id)
+
+    def _maybe_incremental_macro_preview_from_stream(self, novel_id: str) -> None:
+        """流式生成过程中周期性解析缓冲 JSON，提前写入 preview_parts 供 SSE 推节点。"""
+        import time
+
+        prog = _macro_plan_progress_store.get(novel_id)
+        if not prog or str(prog.get("status") or "") != "running":
+            return
+        buf = prog.get("llm_stream_text") or ""
+        if len(buf) < 320:
+            return
+
+        now = time.monotonic()
+        if now - _last_macro_incremental_preview_ts.get(novel_id, 0) < 0.42:
+            return
+        _last_macro_incremental_preview_ts[novel_id] = now
+
+        parsed = _try_parse_parts_from_llm_buffer(buf)
+        if not parsed:
+            return
+
+        old_parts = prog.get("preview_parts")
+        old_list = old_parts if isinstance(old_parts, list) else None
+        old_score = _macro_incremental_tree_score(old_list)
+        new_score = _macro_incremental_tree_score(parsed)
+        if new_score <= old_score:
+            return
+
+        self._set_macro_preview_parts(novel_id, parsed)
+        logger.debug(
+            "[MacroIncrementalPreview] novel=%s tree_score %s→%s top_parts=%d",
+            novel_id,
+            old_score,
+            new_score,
+            len(parsed),
+        )
+
+    async def _stream_macro_llm_text(
+        self,
+        novel_id: str,
+        prompt: Prompt,
+        config: GenerationConfig,
+    ) -> str:
+        """流式调用 LLM，边收 token 边写入宏观进度（供 SSE / 轮询展示）。"""
+        parts: List[str] = []
+        chunk_count = 0
+        async for chunk in self.llm_service.stream_generate(prompt, config):
+            parts.append(chunk)
+            chunk_count += 1
+            self._append_macro_llm_stream(novel_id, chunk)
+            if chunk_count == 1 or chunk_count % 50 == 0:
+                total_so_far = sum(len(p) for p in parts)
+                logger.debug(
+                    "[MacroLLMStream] novel=%s upstream_chunks=%d accumulated_chars=%d",
+                    novel_id,
+                    chunk_count,
+                    total_so_far,
+                )
+        joined = "".join(parts)
+        logger.debug(
+            "[MacroLLMStream] novel=%s finished upstream_chunks=%d raw_chars=%d",
+            novel_id,
+            chunk_count,
+            len(joined),
+        )
+        return joined
+
+    async def _stream_act_plan_llm_text(
+        self,
+        act_id: str,
+        prompt: Prompt,
+        config: GenerationConfig,
+    ) -> str:
+        parts: List[str] = []
+        async for chunk in self.llm_service.stream_generate(prompt, config):
+            parts.append(chunk)
+            _append_act_chapters_llm_stream(act_id, chunk)
+        return "".join(parts)
+
+    async def _collect_llm_stream_text(
+        self,
+        prompt: Prompt,
+        config: GenerationConfig,
+    ) -> str:
+        """流式调用 LLM 并拼接全文（无进度存储，用于内部步骤）。"""
+        parts: List[str] = []
+        async for chunk in self.llm_service.stream_generate(prompt, config):
+            parts.append(chunk)
+        return "".join(parts)
 
     def initialize_macro_plan_task(self, novel_id: str) -> None:
         _macro_plan_result_store[novel_id] = {
@@ -662,6 +1004,10 @@ class ContinuousPlanningService:
             total=0,
             message="正在准备结构规划",
         )
+        prog = _macro_plan_progress_store.setdefault(novel_id, {})
+        prog["llm_stream_text"] = ""
+        prog["preview_parts"] = None
+        _mirror_macro_plan_progress_to_shared(novel_id)
 
     def store_macro_plan_result(self, novel_id: str, result: Dict) -> None:
         _macro_plan_result_store[novel_id] = {
@@ -989,6 +1335,30 @@ class ContinuousPlanningService:
             structure.append(part_node)
         return structure
 
+    def _validate_macro_structure_completeness(self, structure: List[Dict], target_chapters: int) -> bool:
+        """Validate that the macro structure has minimum viable nodes (parts + volumes).
+
+        Returns False if structure is missing volumes, which would cause act planning to fail.
+        """
+        if not structure or not isinstance(structure, list):
+            return False
+
+        has_volumes = False
+        for part in structure:
+            volumes = part.get("volumes", [])
+            if volumes and len(volumes) > 0:
+                has_volumes = True
+                break
+
+        if not has_volumes:
+            logger.warning(
+                f"Macro structure validation failed: structure has parts but no volumes. "
+                f"This will cause act planning to fail. Falling back to minimal structure."
+            )
+            return False
+
+        return True
+
     async def apply_macro_plan_from_llm_result(
         self,
         llm_result: Dict,
@@ -1002,7 +1372,16 @@ class ContinuousPlanningService:
         供 POST /novels/{id}/plan 与全托管守护进程共用，避免两处逻辑分叉。
         """
         struct = llm_result.get("structure") if isinstance(llm_result, dict) else None
-        if llm_result.get("success") and isinstance(struct, list) and len(struct) > 0:
+
+        # Validate structure completeness (must have parts AND volumes)
+        is_valid_structure = (
+            llm_result.get("success")
+            and isinstance(struct, list)
+            and len(struct) > 0
+            and self._validate_macro_structure_completeness(struct, target_chapters)
+        )
+
+        if is_valid_structure:
             confirm = await self.persist_macro_structure_with_fallback(
                 novel_id, struct
             )
@@ -1015,12 +1394,13 @@ class ContinuousPlanningService:
 
         if not minimal_fallback_on_empty:
             raise ValueError(
-                "宏观规划未返回有效结构（success 或 structure 无效）"
+                "宏观规划未返回有效结构（success 或 structure 无效或缺少卷节点）"
             )
 
         logger.warning(
-            "宏观规划未返回有效结构（success=%r），使用最小占位结构 novel_id=%s",
+            "宏观规划未返回有效结构（success=%r，有卷=%r），使用最小占位结构 novel_id=%s",
             llm_result.get("success") if isinstance(llm_result, dict) else None,
+            self._validate_macro_structure_completeness(struct, target_chapters) if struct else False,
             novel_id,
         )
         minimal = self.build_minimal_macro_structure(target_chapters)
@@ -1036,6 +1416,22 @@ class ContinuousPlanningService:
 
     # ==================== 幕级规划 ====================
 
+    async def resolve_act_planning_chapter_count(
+        self, act_id: str, custom_chapter_count: Optional[int] = None
+    ) -> int:
+        """与 plan_act_chapters 相同的章数解析逻辑，供 SSE 骨架行数等使用。"""
+        act_node = await self.story_node_repo.get_by_id(act_id)
+        if not act_node:
+            raise ValueError(f"幕节点不存在: {act_id}")
+        _default_cpa = calculate_structure_params(100)["chapters_per_act"]
+        chapter_count = custom_chapter_count or act_node.suggested_chapter_count or _default_cpa
+        if not custom_chapter_count and not act_node.suggested_chapter_count:
+            logger.info(
+                f"[ActPlanning] act={act_id} 无自定义章数且无 suggested_chapter_count，"
+                f"使用引擎推荐值 {_default_cpa}"
+            )
+        return chapter_count
+
     async def plan_act_chapters(
         self, act_id: str, custom_chapter_count: Optional[int] = None
     ) -> Dict:
@@ -1048,29 +1444,24 @@ class ContinuousPlanningService:
 
         bible_context = self._get_bible_context(act_node.novel_id)
         previous_summary = await self._get_previous_acts_summary(act_node)
-        # 使用结构计算引擎的推荐值作为 fallback（替代硬编码的 5）
-        _default_cpa = calculate_structure_params(100)["chapters_per_act"]
-        chapter_count = custom_chapter_count or act_node.suggested_chapter_count or _default_cpa
-        if not custom_chapter_count and not act_node.suggested_chapter_count:
-            logger.info(
-                f"[ActPlanning] act={act_id} 无自定义章数且无 suggested_chapter_count，"
-                f"使用引擎推荐值 {_default_cpa}"
-            )
+        chapter_count = await self.resolve_act_planning_chapter_count(
+            act_id, custom_chapter_count
+        )
 
         prompt = self._build_act_planning_prompt(
             act_node, bible_context, previous_summary, chapter_count
         )
 
+        _reset_act_chapters_llm_stream(act_id)
+        config = GenerationConfig(max_tokens=4096, temperature=0.7)
         try:
-            response = await self.llm_service.generate(
-                prompt, GenerationConfig(max_tokens=4096, temperature=0.7)
-            )
+            raw = await self._stream_act_plan_llm_text(act_id, prompt, config)
         except Exception as e:
             logger.warning(f"幕级规划 LLM 调用失败 act={act_id}: {e}")
             return {"success": False, "act_id": act_id, "chapters": [], "error": str(e)}
 
         try:
-            plan = self._parse_llm_response(response)
+            plan = self._parse_llm_response(raw)
         except Exception as e:
             logger.warning(f"幕级规划 JSON 解析失败 act={act_id}: {e}")
             return {"success": False, "act_id": act_id, "chapters": [], "parse_error": str(e)}
@@ -1099,6 +1490,24 @@ class ContinuousPlanningService:
                 self.chapter_repository.delete(ChapterId(n.id))
             await self.story_node_repo.delete(n.id)
 
+    def _assert_chapter_number_range_free(
+        self, novel_id_vo: NovelId, start: int, length: int
+    ) -> None:
+        """写入前兜底：若区间内仍有正文行残留（异步删未落盘等），报错。"""
+        if not self.chapter_repository:
+            return
+        bad: List[int] = []
+        for n in range(start, start + length):
+            existing = self.chapter_repository.get_by_novel_and_number(novel_id_vo, n)
+            if existing is not None:
+                bad.append(int(n))
+        if bad:
+            raise ValueError(
+                f"无法在本书写入新章节序号 {bad[0]}—{bad[-1]} ："
+                f"正文表中已存在行 {bad[:5]}{'…' if len(bad) > 5 else ''}，或与结构树未完成同步。"
+                f"请重试载入结构树以对齐。"
+            )
+
     async def confirm_act_planning(self, act_id: str, chapters: List[Dict]) -> Dict:
         """确认幕级规划：写入 story_nodes + chapters 表（供工作台侧栏列表），并关联 Bible 元素。"""
         logger.info(f"Confirming act planning for act {act_id}")
@@ -1109,12 +1518,22 @@ class ContinuousPlanningService:
 
         await self._remove_chapter_children_of_act(act_id)
 
-        novel_id_vo = NovelId(act_node.novel_id)
-        existing_book = []
-        if self.chapter_repository:
-            existing_book = self.chapter_repository.list_by_novel(novel_id_vo)
-        max_num = max((c.number for c in existing_book), default=0)
-        next_global_number = max_num + 1
+        novel_id_str = act_node.novel_id
+        novel_id_vo = NovelId(novel_id_str)
+        # ★ 树为真源：正文表多出或无对应树上章节的行一律清掉后再顺延编号
+        pruned = purge_chapter_book_rows_not_matching_structure(
+            self.story_node_repo,
+            self.chapter_repository,
+            novel_id_str,
+        )
+        if pruned:
+            logger.info("[ActPlanning] novel=%s 已对齐全书正文↔结构，删行 %s 条", novel_id_str, pruned)
+
+        chapter_nums_on_tree = collect_structure_chapter_numbers(self.story_node_repo, novel_id_str)
+        next_global_number = (max(chapter_nums_on_tree) + 1) if chapter_nums_on_tree else 1
+        self._assert_chapter_number_range_free(
+            novel_id_vo, next_global_number, len(chapters)
+        )
 
         created_chapters: List[StoryNode] = []
         created_elements: List[ChapterElement] = []
@@ -2150,10 +2569,22 @@ class ContinuousPlanningService:
             )
 
     def _build_act_planning_prompt(self, act_node: StoryNode, bible_context: Dict, previous_summary: Optional[str], chapter_count: int) -> Prompt:
-        """构建幕级规划提示词"""
-        system_msg = """你是一个专业的小说章节规划助手，擅长设计章节大纲和情节安排。
-你的任务是根据提供的信息生成章节规划，即使信息不完整也要生成合理的框架。
-请直接输出 JSON 格式，不要询问额外信息，不要添加任何解释性文字。"""
+        """构建幕级规划提示词
+
+        ★ Phase 3: 增强版——强制标注爽点 + 伏笔收种计划
+        核心改进：
+        1. 每章必须标注 thrill_type（爽点类型）：power_reveal / identity_reveal / action / suspense 等
+        2. 每章必须标注 foreshadow_action（伏笔操作）：plant(种) / resolve(收) / none
+        3. 前三章强制 power_reveal 或 identity_reveal（商业网文铁律）
+        """
+        system_msg = """你是一位手握无数畅销书的狂热白金级网文主编，擅长设计让读者欲罢不能的章节大纲。
+
+你的铁律：
+1. 每章必须有至少一个"爽点"——让读者肾上腺素飙升的时刻
+2. 伏笔必须有计划地"种"和"收"——不能只种不收，也不能无铺垫地收
+3. 前三章必须是 power_reveal（实力展露）或 identity_reveal（身份揭露）——绝不接受 character_intro
+
+请直接输出 JSON 格式，不要添加任何解释性文字。"""
 
         # 构建上下文信息
         context_parts = [f"幕信息：《{act_node.title}》"]
@@ -2174,14 +2605,34 @@ class ContinuousPlanningService:
 
         context = "\n".join(context_parts)
 
+        # ★ Phase 3: 增强型用户提示——强制标注爽点+伏笔收种
         user_msg = f"""{context}
 
-请为这一幕规划 {chapter_count} 个章节。如果没有详细的世界观信息，请生成通用的章节框架。
+请为这一幕规划 {chapter_count} 个章节。每章必须包含爽点标注和伏笔操作。
 
-要求：
-1. 每个章节需要有标题和大纲
-2. 如果有可用的人物和地点，尽量关联；如果没有，可以留空
-3. 章节编号从 1 开始递增
+★★★ 爽点类型说明（thrill_type 必选其一）★★★
+- power_reveal: 实力/能力展露（主角亮出底牌，旁观者震惊）
+- identity_reveal: 身份/地位揭露（隐藏身份曝光，全场震动）
+- action: 战斗/对峙高潮（激烈冲突，胜负翻转）
+- suspense: 悬念爆发（重大真相揭露，认知颠覆）
+- emotion: 情感爆发（极致情感冲击，催泪/燃点）
+- hook: 钩子开场（以强冲突开场，立刻抓住读者）
+
+★★★ 伏笔操作说明（foreshadow_action 必选其一）★★★
+- plant: 种下新伏笔（埋下未来线索，暗示更大秘密）
+- resolve: 回收旧伏笔（揭晓之前的悬念，给读者满足感）
+- plant_and_resolve: 同时种新收旧（最佳节奏——满足读者同时吊住胃口）
+- none: 无伏笔操作（仅限纯动作/过渡章节，每幕不超过2章）
+
+★★★ 前三章铁律 ★★★
+第1章：必须是 hook + power_reveal 或 identity_reveal
+第2章：必须有 power_reveal 或 identity_reveal
+第3章：必须有 action 或 power_reveal
+
+★★★ 伏笔节奏铁律 ★★★
+- 本幕内种下的伏笔，必须有至少1条在本幕或下一幕回收
+- 不能连续2章都是 foreshadow_action=none
+- 最后一章必须 resolve 或 plant_and_resolve
 
 请直接输出 JSON 格式，不要添加任何说明文字：
 {{
@@ -2189,9 +2640,13 @@ class ContinuousPlanningService:
     {{
       "number": 1,
       "title": "章节标题",
-      "outline": "章节大纲（100-200字）",
+      "outline": "章节大纲（100-200字，必须描述爽点的具体内容）",
       "characters": ["人物ID"],
-      "locations": ["地点ID"]
+      "locations": ["地点ID"],
+      "thrill_type": "power_reveal",
+      "thrill_description": "爽点描述：主角在什么场景下展露了什么实力/身份，旁观者如何反应",
+      "foreshadow_action": "plant",
+      "foreshadow_detail": "伏笔细节：种下/回收了什么伏笔"
     }}
   ]
 }}"""
@@ -2245,8 +2700,11 @@ class ContinuousPlanningService:
         prompt = self._build_next_act_prompt_with_dual_track(current_act, dual_track_context)
         
         try:
-            response = await self.llm_service.generate(prompt, GenerationConfig(max_tokens=4096, temperature=0.7))
-            result = self._parse_llm_response(response)
+            raw = await self._collect_llm_stream_text(
+                prompt,
+                GenerationConfig(max_tokens=4096, temperature=0.7),
+            )
+            result = self._parse_llm_response(raw)
             
             # 确保返回必要的字段
             if not isinstance(result, dict):
@@ -2370,13 +2828,10 @@ class ContinuousPlanningService:
     ) -> Prompt:
         """构建双轨融合的下一幕生成 Prompt"""
         
-        system = """你是一位资深的小说结构设计师，擅长在长篇叙事中推进剧情。
-你的任务是为下一幕设计详细的内容规划，确保：
-1. 与前文保持连贯，不出现时间线或人物状态矛盾
-2. 有意识地回收或推进已有伏笔
-3. 设置新的冲突和悬念
-
-请直接输出 JSON 格式，不要添加解释性文字。"""
+        system = self._get_cpms_system(
+            "continuous-planning-next-act",
+            "你是一位资深的小说结构设计师，擅长在长篇叙事中推进剧情。\n你的任务是为下一幕设计详细的内容规划，确保：\n1. 与前文保持连贯，不出现时间线或人物状态矛盾\n2. 有意识地回收或推进已有伏笔\n3. 设置新的冲突和悬念\n\n请直接输出 JSON 格式，不要添加解释性文字。",
+        )
         
         # 组装双轨上下文
         context_parts = []

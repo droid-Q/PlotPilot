@@ -2,7 +2,7 @@
   <div class="right-panel">
     <!-- 章节上下文（当有章节时显示） -->
     <div v-if="currentChapter" class="chapter-context-bar">
-      <span class="chapter-context-label">第{{ currentChapter.number }}章</span>
+      <span class="chapter-context-label">{{ narrativeContextLabel }}</span>
       <n-tag
         :type="currentChapter.word_count > 0 ? 'success' : 'default'"
         size="tiny"
@@ -19,9 +19,10 @@
       size="small"
       class="settings-tabs"
       :tabs-padding="4"
+      @update:value="onTabsUpdateValue"
     >
       <n-tab-pane name="bible" tab="作品设定" display-directive="if">
-        <BiblePanel :key="bibleKey" :slug="slug" />
+        <BiblePanel :slug="slug" :reload-nonce="bibleReloadNonce" />
       </n-tab-pane>
       <n-tab-pane name="worldbuilding" tab="世界观" display-directive="if">
         <WorldbuildingPanel :slug="slug" />
@@ -29,14 +30,17 @@
       <n-tab-pane name="knowledge" tab="知识库" display-directive="if">
         <KnowledgePanel :slug="slug" />
       </n-tab-pane>
-      <n-tab-pane name="storyline-arc" tab="故事线" display-directive="if">
-        <StorylinePlotOverviewPanel :slug="slug" :current-chapter="currentChapter?.number ?? null" />
+      <n-tab-pane name="props" tab="手稿道具" display-directive="if">
+        <ManuscriptPropsPanel :slug="slug" :current-chapter="currentChapter" />
       </n-tab-pane>
-      <n-tab-pane name="chronicles" tab="编年史" display-directive="if">
-        <HolographicChroniclesPanel :slug="slug" />
+      <n-tab-pane name="story-evolution" tab="故事演进" display-directive="if">
+        <StoryEvolutionPanel :slug="slug" :current-chapter="currentChapter?.number ?? null" />
       </n-tab-pane>
-      <n-tab-pane name="sandbox" tab="对话沙盒" display-directive="if">
-        <SandboxDialoguePanel :slug="slug" />
+      <n-tab-pane name="sandbox" tab="角色锚点" display-directive="if">
+        <CharacterDialoguePanel
+          :slug="slug"
+          :current-chapter-number="currentChapter?.number ?? null"
+        />
       </n-tab-pane>
       <n-tab-pane name="foreshadow" tab="伏笔账本" display-directive="if">
         <ForeshadowLedgerPanel :slug="slug" />
@@ -46,28 +50,35 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 import BiblePanel from '../panels/BiblePanel.vue'
+import ManuscriptPropsPanel from './ManuscriptPropsPanel.vue'
 import KnowledgePanel from '../knowledge/KnowledgePanel.vue'
 import WorldbuildingPanel from './WorldbuildingPanel.vue'
-import StorylinePlotOverviewPanel from './StorylinePlotOverviewPanel.vue'
-import HolographicChroniclesPanel from './HolographicChroniclesPanel.vue'
+import StoryEvolutionPanel from './StoryEvolutionPanel.vue'
 import ForeshadowLedgerPanel from './ForeshadowLedgerPanel.vue'
-import SandboxDialoguePanel from './SandboxDialoguePanel.vue'
+import CharacterDialoguePanel from './CharacterDialoguePanel.vue'
+import type { GenerationPrefsDTO } from '@/api/novel'
+import { narrativeOrdinalLabel } from '@/utils/narrativeUnitLabel'
 
 /** 所有合法 tab 名 */
 const ALL_TABS = new Set([
+  'props',
   'bible', 'worldbuilding', 'knowledge',
-  'storyline-arc', 'chronicles',
+  'story-evolution',
   'sandbox', 'foreshadow',
 ])
 
 /** 旧版 tab 名映射到新 tab 名 */
 const LEGACY_TAB_MAP: Record<string, string> = {
-  'storylines': 'storyline-arc',
-  'plot-arc': 'storyline-arc',
-  'timeline': 'chronicles',
-  'snapshots': 'chronicles',
+  'storylines': 'story-evolution',
+  'plot-arc': 'story-evolution',
+  'timeline': 'story-evolution',
+  'chronicles': 'story-evolution',
+  'checkpoint': 'story-evolution',
+  'story-phase': 'story-evolution',
+  'character-soul': 'sandbox',
+  'voice-drift': 'sandbox',
   'foreshadow-suggestions': 'sandbox',
   'macro-refactor': 'bible',
 }
@@ -88,14 +99,20 @@ interface Chapter {
 interface Props {
   slug: string
   currentPanel?: string
-  bibleKey?: number
   currentChapter?: Chapter | null
+  generationPrefs?: GenerationPrefsDTO | null
 }
 
 const props = withDefaults(defineProps<Props>(), {
   currentPanel: 'bible',
-  bibleKey: 0,
   currentChapter: null,
+  generationPrefs: null,
+})
+
+const narrativeContextLabel = computed(() => {
+  const ch = props.currentChapter
+  if (!ch) return ''
+  return narrativeOrdinalLabel(ch.number, props.generationPrefs ?? undefined)
 })
 
 const emit = defineEmits<{
@@ -104,8 +121,22 @@ const emit = defineEmits<{
 
 const activeTab = ref(resolveTab(props.currentPanel))
 
+/** 每次选中「作品设定」Tab 递增，驱动 BiblePanel 拉取（Naive 点击 Tab 比 watch(activeTab) 更可靠） */
+const bibleReloadNonce = ref(0)
+
+function onTabsUpdateValue(name: string | number) {
+  if (name === 'bible') {
+    bibleReloadNonce.value += 1
+  }
+}
+
 watch(() => props.currentPanel, (newVal) => {
-  activeTab.value = resolveTab(newVal)
+  const next = resolveTab(newVal)
+  const prev = activeTab.value
+  activeTab.value = next
+  if (next === 'bible' && prev !== 'bible') {
+    bibleReloadNonce.value += 1
+  }
 })
 
 watch(activeTab, (tab) => {
@@ -120,8 +151,8 @@ watch(activeTab, (tab) => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--aitext-panel-muted);
-  border-left: 1px solid var(--aitext-split-border);
+  background: var(--plotpilot-panel-muted);
+  border-left: 1px solid var(--plotpilot-split-border);
 }
 
 /* 当前章节上下文提示条 */
@@ -131,7 +162,7 @@ watch(activeTab, (tab) => {
   gap: 6px;
   padding: 4px 12px;
   background: var(--app-surface);
-  border-bottom: 1px solid var(--aitext-split-border);
+  border-bottom: 1px solid var(--plotpilot-split-border);
   flex-shrink: 0;
   font-size: 12px;
   color: var(--app-text-muted);
@@ -152,7 +183,7 @@ watch(activeTab, (tab) => {
 .settings-tabs :deep(.n-tabs-nav) {
   padding: 0 8px;
   background: var(--app-surface);
-  border-bottom: 1px solid var(--aitext-split-border);
+  border-bottom: 1px solid var(--plotpilot-split-border);
   overflow-x: auto;
   scrollbar-width: none;
 }

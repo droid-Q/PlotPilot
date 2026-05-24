@@ -1,14 +1,17 @@
 """Novel 应用服务"""
+import json
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from domain.novel.entities.novel import Novel, NovelStage
 from domain.novel.entities.chapter import Chapter
 from domain.novel.value_objects.novel_id import NovelId
+from domain.novel.value_objects.generation_preferences import GenerationPreferences
 from domain.novel.value_objects.word_count import WordCount
 from domain.novel.repositories.novel_repository import NovelRepository
 from domain.novel.repositories.chapter_repository import ChapterRepository
 from domain.shared.exceptions import EntityNotFoundError
 from application.core.dtos.novel_dto import NovelDTO
+from application.core.chapter_target_limits import clamp_chapter_target_words
 from application.core.v1_length_tiers import (
     build_v1_structure_black_box_hint,
     resolve_v1_length_params,
@@ -316,6 +319,7 @@ class NovelService:
         target_chapters: Optional[int] = None,
         premise: Optional[str] = None,
         target_words_per_chapter: Optional[int] = None,
+        generation_prefs: Optional[Dict[str, Any]] = None,
     ) -> NovelDTO:
         """更新小说基本信息
 
@@ -325,7 +329,8 @@ class NovelService:
             author: 作者（可选）
             target_chapters: 目标章节数（可选）
             premise: 故事梗概/创意（可选）
-            target_words_per_chapter: 每章目标字数（可选，500–10000）
+            target_words_per_chapter: 每章目标字数（可选，500–20000）
+            generation_prefs: 生成偏好（可选；仅更新传入的键）
 
         Returns:
             更新后的 NovelDTO
@@ -347,10 +352,31 @@ class NovelService:
         if premise is not None:
             novel.premise = premise
         if target_words_per_chapter is not None:
-            tw = int(target_words_per_chapter)
-            novel.target_words_per_chapter = max(500, min(10000, tw))
+            novel.target_words_per_chapter = clamp_chapter_target_words(target_words_per_chapter)
+        if generation_prefs is not None:
+            novel.generation_prefs = GenerationPreferences.merge_patch(
+                novel.generation_prefs, generation_prefs
+            )
 
-        self.novel_repository.save(novel)
+        # 增量 patch：避免全量 save 把 autopilot_status 等未改字段写回 stopped
+        patch_fields: Dict[str, Any] = {}
+        if title is not None:
+            patch_fields["title"] = title
+        if author is not None:
+            patch_fields["author"] = author
+        if target_chapters is not None:
+            patch_fields["target_chapters"] = target_chapters
+        if premise is not None:
+            patch_fields["premise"] = premise
+        if target_words_per_chapter is not None:
+            patch_fields["target_words_per_chapter"] = novel.target_words_per_chapter
+        if generation_prefs is not None:
+            patch_fields["generation_prefs_json"] = json.dumps(
+                novel.generation_prefs.to_dict(), ensure_ascii=False
+            )
+        if patch_fields:
+            self.novel_repository.patch(NovelId(novel_id), **patch_fields)
+
         return NovelDTO.from_domain(self._hydrate_chapters(novel))
 
     def update_novel_stage(self, novel_id: str, stage: str) -> NovelDTO:

@@ -33,6 +33,8 @@ export interface LLMProfile {
 export interface LLMControlConfig {
   version: number
   active_profile_id: string | null
+  /** 与后端一致：unified = 共用主力端点；independent = 分角色档案 */
+  endpoint_mode?: 'unified' | 'independent'
   profiles: LLMProfile[]
 }
 
@@ -200,6 +202,101 @@ export interface RenderResult {
   user: string
 }
 
+/** 调试结果（含诊断信息） */
+export interface DebugResult {
+  success: boolean
+  system: string
+  user: string
+  diagnostics: {
+    errors: string[]
+    warnings: string[]
+    missing_variables: string[]
+    rendered_variables: string[]
+    missing_required: string[]
+  }
+  node_key: string
+  node_name: string
+  variables_provided: string[]
+  elapsed_ms: number
+  error?: string
+}
+
+/** COT 调用链结果 */
+export interface PromptChainResult {
+  node_key: string
+  node_name: string
+  category: string
+  source: string
+  bindings: Array<{
+    workflow_id: string
+    workflow_name: string
+    slot: string
+    priority: number
+    enabled: boolean
+  }>
+  reverse_dependencies: Array<{
+    workflow_id: string
+    workflow_name: string
+    slot: string
+  }>
+  variables: Array<{
+    name: string
+    type: string
+    source: string
+    required: boolean
+    default: unknown
+  }>
+  version_count: number
+}
+
+/** 沙盒渲染结果 */
+export interface SandboxResult {
+  valid: boolean
+  errors: string[]
+  warnings: string[]
+  missing_variables: string[]
+  missing_required: string[]
+  system_preview: string
+  user_preview: string
+  template_variables: {
+    system: string[]
+    user: string[]
+    all: string[]
+  }
+  provided_variables: string[]
+  elapsed_ms: number
+  error?: string
+}
+
+/** 变量 Schema */
+export interface VariableSchema {
+  name: string
+  display_name: string
+  type: string
+  required: boolean
+  default: unknown
+  description: string
+  source: string
+  scope: string
+  enum_values: string[]
+}
+
+/** 节点绑定结果 */
+export interface NodeBindingsResult {
+  node_key: string
+  node_name: string
+  bindings: Array<{
+    id: string
+    workflow_id: string
+    workflow_name: string
+    node_key: string
+    slot: string
+    priority: number
+    enabled: boolean
+  }>
+  binding_count: number
+}
+
 // ---------- 请求类型 ----------
 
 export interface PromptUpdatePayload {
@@ -233,7 +330,16 @@ export interface RenderPayload {
 
 // ---------- API 调用 ----------
 
+export interface PlazaInitResult {
+  stats: PromptStats
+  categories: PromptCategoryInfo[]
+  nodes_by_category: Record<string, PromptNode[]>
+}
+
 export const promptPlazaApi = {
+  /** 首屏聚合接口：stats + categories + nodes 一次返回 */
+  plazaInit: () => apiClient.get<PlazaInitResult>('/llm-control/prompts/plaza-init'),
+
   /** 统计 */
   getStats: () => apiClient.get<PromptStats>('/llm-control/prompts/stats'),
 
@@ -320,4 +426,34 @@ export const promptPlazaApi = {
       '/llm-control/prompts/import',
       payload,
     ),
+
+  // ---- CPMS 增强端点：调试 / COT / 沙盒 / 变量 / 绑定 ----
+
+  /** 单节点调试：渲染 + 诊断信息 */
+  debugNode: (nodeKey: string, variables: Record<string, unknown>, validateSchemas = true) =>
+    apiClient.post<DebugResult>(
+      `/llm-control/prompts/${nodeKey}/debug`,
+      { variables, validate_schemas: validateSchemas },
+    ),
+
+  /** COT 展示：节点调用链（绑定关系 + 依赖图） */
+  getPromptChain: (nodeKey: string) =>
+    apiClient.get<PromptChainResult>(`/llm-control/prompts/${nodeKey}/chain`),
+
+  /** 沙盒渲染校验（保存前预检） */
+  sandboxRender: (nodeKey: string, system: string, userTemplate: string, variables: Record<string, unknown>) =>
+    apiClient.post<SandboxResult>(
+      `/llm-control/prompts/${nodeKey}/sandbox`,
+      { system, user_template: userTemplate, variables },
+    ),
+
+  /** 全局变量注册表 */
+  listVariables: (nodeKey?: string) => {
+    const qs = nodeKey ? `?node_key=${encodeURIComponent(nodeKey)}` : ''
+    return apiClient.get<VariableSchema[]>(`/llm-control/prompts/variables${qs}`)
+  },
+
+  /** 节点绑定关系 */
+  getNodeBindings: (nodeKey: string) =>
+    apiClient.get<NodeBindingsResult>(`/llm-control/prompts/${nodeKey}/bindings`),
 }

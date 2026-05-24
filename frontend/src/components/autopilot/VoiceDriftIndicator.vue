@@ -17,7 +17,7 @@
           :rail-color="railColor"
           :stroke-width="8"
           :show-indicator="false"
-          :style="{ width: '100px', height: '100px' }"
+          :style="{ width: '76px', height: '76px' }"
         />
         <div class="progress-center">
           <div class="drift-icon">{{ driftIcon }}</div>
@@ -106,6 +106,7 @@ const props = defineProps<{
   novelId: string
   safeThreshold?: number  // 安全阈值，默认 3.0
   dangerThreshold?: number  // 危险阈值，默认 6.0
+  refreshKey?: number  // 🔥 刷新信号，变化时重新拉数据
 }>()
 
 const emit = defineEmits<{
@@ -260,6 +261,11 @@ watch(() => props.novelId, () => {
   startPolling()
 })
 
+// 🔥 刷新信号变化时重新加载（由 Dashboard 的 SSE 事件驱动）
+watch(() => props.refreshKey, (newKey) => {
+  if (newKey && newKey > 0) void loadDriftData()
+})
+
 // 生命周期
 onMounted(() => {
   startPolling()
@@ -274,8 +280,8 @@ onUnmounted(() => {
 .voice-drift-indicator {
   background: var(--card-color);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 12px;
+  border-radius: 10px;
+  padding: 14px 16px;
 }
 
 .indicator-header {
@@ -293,8 +299,8 @@ onUnmounted(() => {
 
 .indicator-body {
   display: flex;
-  align-items: center;
-  gap: 16px;
+  align-items: flex-start;
+  gap: 18px;
 }
 
 .progress-circle {
@@ -311,12 +317,12 @@ onUnmounted(() => {
 }
 
 .drift-icon {
-  font-size: 24px;
-  margin-bottom: 4px;
+  font-size: 18px;
+  margin-bottom: 2px;
 }
 
 .drift-score {
-  font-size: 16px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--text-color-1);
   font-variant-numeric: tabular-nums;
@@ -325,18 +331,20 @@ onUnmounted(() => {
 .status-info {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   flex: 1;
+  min-width: 0;
+  padding-top: 2px;
 }
 
 .status-label {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
 }
 
 .status-desc {
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.55;
 }
 
 .last-check {

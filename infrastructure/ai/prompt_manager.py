@@ -1,10 +1,11 @@
-"""PromptManager — 提示词统一管理服务（数据库驱动版）。
+"""PromptManager — 提示词统一管理服务（CPMS v5）。
 
 核心设计：
 - 提示词存入 SQLite（prompt_templates / prompt_nodes / prompt_versions）
 - 单节点版本管理（每次编辑创建新版本，支持回滚）
 - 整体模板概念（template 包含多个 node，可组合成工作流）
-- 内置种子从 prompts_defaults.json 初始化
+- 内置种子仅从 ``infrastructure/ai/prompt_packages/nodes/*/`` 加载（YAML 元数据 + Markdown 正文）
+- 旧版 JSON 种子已废弃
 - Jinja2 兼容的变量渲染
 
 数据模型：
@@ -14,63 +15,36 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import sys
+import threading
 import uuid
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# 内置种子 JSON 路径
-# 生产版(AITEXT_PROD_DATA_DIR): 从数据目录加载
-# 开发版: 从源码目录加载
-_DEFAULT_SEED_PATH = (
-    Path(__file__).resolve().parent / "prompts" / "prompts_defaults.json"
-)
-
-
-def _get_seed_path() -> Path:
-    """获取种子文件路径，打包后优先从数据目录或 bundle 资源目录读取。
-
-    优先级：
-    1. DATA_DIR/prompts/          — 首次启动时从 bundle 复制过来的位置
-    2. sys._MEIPASS 打包资源       — PyInstaller freeze 时的 bundle 目录
-    3. 源码目录（开发用）           — fallback
-    """
-    # 1. 数据目录（生产环境首选）
-    if os.getenv("AITEXT_PROD_DATA_DIR"):
-        from application.paths import DATA_DIR
-
-        prod_path = DATA_DIR / "prompts" / "prompts_defaults.json"
-        if prod_path.exists():
-            return prod_path
-
-    # 2. PyInstaller bundle 资源目录（冻结后 infrastructure/ 在此路径下）
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        meipass = Path(sys._MEIPASS)
-        bundled = meipass / "infrastructure" / "ai" / "prompts" / "prompts_defaults.json"
-        if bundled.exists():
-            return bundled
-
-    # 3. 源码目录（开发环境）
-    return _DEFAULT_SEED_PATH
-
-# 分类定义（与 prompts_defaults.json 的 categories 对应）
+# 分类定义（与 prompts_*.json 的 category 对应）
 BUILTIN_CATEGORIES = [
-    {"key": "generation", "name": "📝 内容生成", "icon": "✍️",
-     "description": "章节正文、场景、对白等创作类提示词", "color": "#4f46e5"},
+    {"key": "anti-ai", "name": "🛡️ Anti-AI 防御", "icon": "🛡️",
+     "description": "七层纵深防御体系：从提示词重构到Token级拦截再到章后审计，系统性消除AI味", "color": "#dc2626",
+     "sort_order": 0},
+    {"key": "generation", "name": "✍️ 内容生成", "icon": "✍️",
+     "description": "核心创作引擎：章节正文、场景、对白、节拍流式写作。以'展示而非告知'为灵魂，拒绝AI味，追求人味叙事。", "color": "#4f46e5",
+     "sort_order": 1},
     {"key": "extraction", "name": "🔍 信息提取", "icon": "🔎",
-     "description": "从文本中提取结构化信息的分析类提示词", "color": "#0891b2"},
-    {"key": "review", "name": "✅ 审稿质检", "icon": "🔬",
-     "description": "一致性检查、质量评估等审稿类提示词", "color": "#b45309"},
+     "description": "基于文学批评视角的结构化文本逆向解析：状态提取、张力评分、叙事同步、文风指纹", "color": "#0891b2",
+     "sort_order": 2},
+    {"key": "review", "name": "🔬 审稿质检", "icon": "🔬",
+     "description": "主编级的人物OOC预警、逻辑自洽与节奏体检。双刀策略：OOC检测+AI味检测。", "color": "#b45309",
+     "sort_order": 3},
     {"key": "planning", "name": "📐 规划设计", "icon": "📋",
-     "description": "大纲拆解、节拍表、摘要、宏观规划等", "color": "#6d28d9"},
-    {"key": "world", "name": "🌍 世界设定", "icon": "🏰",
-     "description": "Bible 人物、地点、世界观、文风生成", "color": "#15803d"},
-    {"key": "creative", "name": "🎭 创意辅助", "icon": "💡",
-     "description": "对白润色、重构提案、卡文诊断等", "color": "#be185d"},
+     "description": "好莱坞三幕剧与英雄之旅结合的宏观及微观拆解：节拍表、幕规划、主线推演、各级摘要", "color": "#6d28d9",
+     "sort_order": 4},
+    {"key": "world", "name": "🏰 世界设定", "icon": "🏰",
+     "description": "基于5维度沉浸式框架的Bible知识库构建：完整Bible、世界观、人物群像、地点地图", "color": "#15803d",
+     "sort_order": 5},
+    {"key": "creative", "name": "💡 创意辅助", "icon": "💡",
+     "description": "打破写作瓶颈，提供高概念推演与潜台词对话重塑、卡文诊断", "color": "#be185d",
+     "sort_order": 6},
 ]
 
 
@@ -306,7 +280,7 @@ class PromptManager:
     1. 从 DB 加载/查询提示词（nodes + versions）
     2. 版本管理：每次编辑 → 新建版本；支持回滚到历史版本
     3. 模板包管理：一组相关节点的集合
-    4. 内置种子初始化：首次启动时从 prompts_defaults.json 导入
+    4. 内置种子初始化：优先从 ``prompt_packages/`` 导入，失败则回退 legacy JSON
     5. 变量渲染：{variable} 占位符替换
     """
 
@@ -318,9 +292,10 @@ class PromptManager:
         """
         self._db = db_connection
         self._seeded = False
+        self._seed_lock = threading.Lock()  # 防止多线程并发写种子导致 SQLite 锁竞争
 
     def _get_db(self):
-        """与主应用共用同一 SQLite（含桌面版 AITEXT_PROD_DATA_DIR）。"""
+        """与主应用共用同一 SQLite（含桌面版 `PLOTPILOT_PROD_DATA_DIR` / 旧名 `AITEXT_PROD_DATA_DIR`）。"""
         if self._db is not None:
             return self._db
         from infrastructure.persistence.database.connection import get_database
@@ -332,37 +307,81 @@ class PromptManager:
     # ------------------------------------------------------------------
 
     def ensure_seeded(self) -> bool:
-        """确保内置种子已导入数据库（幂等）。"""
+        """确保内置种子已导入数据库（幂等）。
+
+        CPMS v5 加载策略：
+        仅从 ``prompt_packages/nodes/*/`` 加载（package.yaml + system.md + user.md）。
+        旧版 prompts_defaults.json / prompts_*.json 已废弃，不再回退。
+
+        线程安全：加锁防止自动托管后台线程与前端 API 并发触发种子写入，
+        避免 SQLite 锁竞争（database is locked）。
+        """
         if self._seeded:
             return True
+
+        with self._seed_lock:
+            # 双重检查：拿到锁后再看一次，可能其它线程已经完成了 seed
+            if self._seeded:
+                return True
+            return self._do_ensure_seeded()
+
+    def _do_ensure_seeded(self) -> bool:
+        """ensure_seeded 的实际实现（已在锁内调用）。"""
         db = self._get_db()
         conn = db.get_connection()
 
+        from infrastructure.ai.prompt_seed.loader import load_seed_bundle
+
+        bundle_meta, prompt_list = load_seed_bundle()
+
+        if not prompt_list:
+            logger.error("没有找到任何提示词种子（prompt_packages/nodes/ 为空），请检查节点包目录")
+            return False
+
+        logger.info("PromptManager: 使用 prompt_packages 种子（%d 个节点）", len(prompt_list))
+        seed_data = {"_meta": bundle_meta, "prompts": prompt_list}
+
+        meta = seed_data.get("_meta", {})
+        seed_version = meta.get("version", "1.0.0")
+        prompts = seed_data.get("prompts", [])
+
         # 检查是否已有内置模板包
         row = conn.execute(
-            "SELECT id FROM prompt_templates WHERE is_builtin=1 LIMIT 1"
+            "SELECT id, metadata FROM prompt_templates WHERE is_builtin=1 LIMIT 1"
         ).fetchone()
-        if row:
+
+        if not row:
+            # 首次导入：完整初始化
+            return self._do_full_seed(conn, seed_data, meta)
+
+        # 已有种子，检查版本
+        template_id = row["id"]
+        existing_meta = {}
+        try:
+            existing_meta = json.loads(row["metadata"]) if row["metadata"] else {}
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        existing_version = existing_meta.get("version", "")
+
+        if existing_version == seed_version:
             self._seeded = True
-            logger.info("PromptManager: 内置种子已存在，跳过初始化")
+            logger.info("PromptManager: 种子版本相同 (%s)，跳过更新", seed_version)
             return True
 
-        seed_path = _get_seed_path()
-        if not seed_path.exists():
-            logger.warning("内置种子文件不存在: %s", seed_path)
-            return False
+        # 版本不同，执行增量更新
+        logger.info(
+            "PromptManager: 检测到种子更新 %s → %s，开始增量同步...",
+            existing_version, seed_version
+        )
+        return self._do_incremental_update(conn, seed_data, meta, template_id)
 
-        try:
-            seed_data = json.loads(seed_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.error("读取种子文件失败: %s", exc)
-            return False
-
+    def _do_full_seed(self, conn, seed_data: Dict, meta: Dict) -> bool:
+        """完整导入种子（首次启动）。"""
         template_id = _uid()
         now = datetime.now().isoformat()
 
         # 创建内置模板包
-        meta = seed_data.get("_meta", {})
         conn.execute("""
             INSERT INTO prompt_templates
             (id, name, description, category, version, author, icon, color, is_builtin, metadata, created_at, updated_at)
@@ -380,47 +399,227 @@ class PromptManager:
         # 批量插入节点和初始版本
         prompts = seed_data.get("prompts", [])
         for idx, p in enumerate(prompts):
-            node_id = _uid()
-            ver_id = _uid()
-            tags_json = json.dumps(p.get("tags", []), ensure_ascii=False)
-            vars_json = json.dumps(p.get("variables", []), ensure_ascii=False)
-
-            conn.execute("""
-                INSERT INTO prompt_nodes
-                (id, template_id, node_key, name, description, category, source,
-                 output_format, contract_module, contract_model, tags, variables,
-                 system_file, is_builtin, sort_order, active_version_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
-            """, (
-                node_id, template_id,
-                p.get("id", f"node-{idx}"),
-                p.get("name", ""),
-                p.get("description", ""),
-                p.get("category", "generation"),
-                p.get("source", ""),
-                p.get("output_format", "text"),
-                p.get("contract_module"),
-                p.get("contract_model"),
-                tags_json, vars_json,
-                p.get("system_file"),
-                idx,
-                ver_id, now, now,
-            ))
-
-            system_content = p.get("system", "")
-
-            conn.execute("""
-                INSERT INTO prompt_versions
-                (id, node_id, version_number, system_prompt, user_template,
-                 change_summary, created_by, created_at)
-                VALUES (?, ?, 1, ?, ?, '初始种子', 'system', ?)
-            """, (ver_id, node_id, system_content, p.get("user_template", ""), now))
+            self._insert_node(conn, template_id, idx, p, now)
 
         conn.commit()
         self._seeded = True
-        count = len(prompts)
-        logger.info("PromptManager: 已导入 %d 个内置提示词种子", count)
+        logger.info("PromptManager: 已导入 %d 个内置提示词种子", len(prompts))
         return True
+
+    def _do_incremental_update(
+        self, conn, seed_data: Dict, meta: Dict, template_id: str
+    ) -> bool:
+        """增量更新种子（已有用户数据）。"""
+        now = datetime.now().isoformat()
+        prompts = seed_data.get("prompts", [])
+        updated_count = 0
+        added_count = 0
+        preserved_count = 0
+
+        # 获取已存在的节点信息
+        existing_nodes = conn.execute(
+            "SELECT id, node_key FROM prompt_nodes WHERE template_id = ?",
+            (template_id,)
+        ).fetchall()
+        existing_keys = {r["node_key"]: r["id"] for r in existing_nodes}
+
+        for idx, p in enumerate(prompts):
+            node_key = p.get("id", f"node-{idx}")
+
+            if node_key not in existing_keys:
+                # 新增的提示词，直接插入
+                self._insert_node(conn, template_id, idx, p, now)
+                added_count += 1
+            else:
+                # 已存在的提示词，检查是否需要更新
+                node_id = existing_keys[node_key]
+                if self._should_update_node(conn, node_id, p, now):
+                    updated_count += 1
+                else:
+                    preserved_count += 1
+
+        # 更新模板包的版本信息
+        conn.execute("""
+            UPDATE prompt_templates
+            SET version = ?, metadata = ?, updated_at = ?
+            WHERE id = ?
+        """, (meta.get("version", "1.0.0"), json.dumps(meta, ensure_ascii=False), now, template_id))
+
+        conn.commit()
+        self._seeded = True
+        logger.info(
+            "PromptManager: 增量同步完成 - 新增 %d，更新 %d，保留用户修改 %d",
+            added_count, updated_count, preserved_count
+        )
+        return True
+
+    def _insert_node(self, conn, template_id: str, idx: int, p: Dict, now: str) -> str:
+        """插入新节点及其初始版本。"""
+        from infrastructure.ai.prompt_seed.normalize import normalize_prompt_record
+
+        p = normalize_prompt_record(dict(p))
+        sort_order = int(p.get("sort_order", idx))
+
+        node_id = _uid()
+        ver_id = _uid()
+        tags_json = json.dumps(p.get("tags", []), ensure_ascii=False)
+        vars_json = json.dumps(p.get("variables", []), ensure_ascii=False)
+
+        conn.execute("""
+            INSERT INTO prompt_nodes
+            (id, template_id, node_key, name, description, category, source,
+             output_format, contract_module, contract_model, tags, variables,
+             system_file, is_builtin, sort_order, active_version_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+        """, (
+            node_id, template_id,
+            p.get("id", f"node-{idx}"),
+            p.get("name", ""),
+            p.get("description", ""),
+            p.get("category", "generation"),
+            p.get("source", ""),
+            p.get("output_format", "text"),
+            p.get("contract_module"),
+            p.get("contract_model"),
+            tags_json, vars_json,
+            p.get("system_file"),
+            sort_order,
+            ver_id, now, now,
+        ))
+
+        conn.execute("""
+            INSERT INTO prompt_versions
+            (id, node_id, version_number, system_prompt, user_template,
+             change_summary, created_by, created_at)
+            VALUES (?, ?, 1, ?, ?, '初始种子', 'system', ?)
+        """, (ver_id, node_id, p.get("system", ""), p.get("user_template", ""), now))
+
+        return node_id
+
+    def _should_update_node(self, conn, node_id: str, new_data: Dict, now: str) -> bool:
+        """检查节点是否需要更新，并执行更新。
+
+        策略：
+        - 用户修改过（created_by == 'user'）：保留用户版本，跳过更新
+        - 用户未修改过（created_by == 'system'）：用新系统版本覆盖
+        """
+        from infrastructure.ai.prompt_seed.normalize import normalize_prompt_record
+
+        # 获取当前激活版本 + 节点 variables（扩展字段如 _directives 存于此）
+        row = conn.execute("""
+            SELECT v.id, v.version_number, v.system_prompt, v.user_template, v.created_by,
+                   n.variables AS node_variables_json
+            FROM prompt_versions v
+            INNER JOIN prompt_nodes n ON n.active_version_id = v.id
+            WHERE n.id = ?
+        """, (node_id,)).fetchone()
+
+        if not row:
+            # 没有激活版本，直接插入新版本
+            return self._update_system_version(conn, node_id, new_data, 1, now)
+
+        created_by = row["created_by"]
+
+        # 比较内容是否有变化
+        new_norm = normalize_prompt_record(dict(new_data))
+        new_system = new_norm.get("system", "")
+        new_user = new_norm.get("user_template", "")
+        new_vars = new_norm.get("variables", [])
+        old_system = row["system_prompt"] or ""
+        old_user = row["user_template"] or ""
+
+        try:
+            old_vars = json.loads(row["node_variables_json"]) if row["node_variables_json"] else []
+        except (json.JSONDecodeError, TypeError):
+            old_vars = []
+        if not isinstance(old_vars, list):
+            old_vars = []
+
+        def _vars_sig(obj: Any) -> str:
+            return json.dumps(obj or [], ensure_ascii=False, sort_keys=True)
+
+        if (
+            new_system == old_system
+            and new_user == old_user
+            and _vars_sig(new_vars) == _vars_sig(old_vars)
+        ):
+            # 内容相同，无需更新
+            return False
+
+        if created_by == "user":
+            # 用户修改过：保留用户版本，跳过更新
+            logger.info(
+                "节点 %s 有用户修改，保留用户版本，跳过系统更新",
+                new_data.get("id", node_id)
+            )
+            return False
+        else:
+            # 系统版本：直接覆盖
+            return self._overwrite_system_version(conn, node_id, row["id"], new_norm, now)
+
+    def _update_system_version(self, conn, node_id: str, new_data: Dict, next_ver: int, now: str) -> bool:
+        """创建新的系统版本。"""
+        from infrastructure.ai.prompt_seed.normalize import normalize_prompt_record
+
+        new_data = normalize_prompt_record(dict(new_data))
+        new_ver_id = _uid()
+        new_system = new_data.get("system", "")
+        new_user = new_data.get("user_template", "")
+
+        conn.execute("""
+            INSERT INTO prompt_versions
+            (id, node_id, version_number, system_prompt, user_template,
+             change_summary, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, '系统更新', 'system', ?)
+        """, (new_ver_id, node_id, next_ver, new_system, new_user, now))
+
+        # 更新节点的激活版本和元数据
+        conn.execute("""
+            UPDATE prompt_nodes
+            SET active_version_id = ?, updated_at = ?
+            WHERE id = ?
+        """, (new_ver_id, now, node_id))
+
+        self._update_node_metadata(conn, node_id, new_data, now)
+        return True
+
+    def _overwrite_system_version(self, conn, node_id: str, version_id: str, new_data: Dict, now: str) -> bool:
+        """直接覆盖系统版本内容。"""
+        from infrastructure.ai.prompt_seed.normalize import normalize_prompt_record
+
+        new_data = normalize_prompt_record(dict(new_data))
+        new_system = new_data.get("system", "")
+        new_user = new_data.get("user_template", "")
+
+        conn.execute("""
+            UPDATE prompt_versions
+            SET system_prompt = ?, user_template = ?, created_at = ?
+            WHERE id = ?
+        """, (new_system, new_user, now, version_id))
+
+        self._update_node_metadata(conn, node_id, new_data, now)
+        logger.info("节点 %s 系统版本已覆盖更新", new_data.get("id", node_id))
+        return True
+
+    def _update_node_metadata(self, conn, node_id: str, p: Dict, now: str) -> None:
+        """更新节点元数据（name, description, tags, variables 等）。"""
+        tags_json = json.dumps(p.get("tags", []), ensure_ascii=False)
+        vars_json = json.dumps(p.get("variables", []), ensure_ascii=False)
+
+        conn.execute("""
+            UPDATE prompt_nodes
+            SET name = ?, description = ?, category = ?, source = ?,
+                output_format = ?, tags = ?, variables = ?, updated_at = ?
+            WHERE id = ?
+        """, (
+            p.get("name", ""),
+            p.get("description", ""),
+            p.get("category", "generation"),
+            p.get("source", ""),
+            p.get("output_format", "text"),
+            tags_json, vars_json,
+            now, node_id
+        ))
 
     # ------------------------------------------------------------------
     # 模板包 CRUD
@@ -812,14 +1011,17 @@ class PromptManager:
     # ------------------------------------------------------------------
 
     def get_stats(self) -> Dict[str, Any]:
-        """获取提示词库统计。"""
+        """获取提示词库统计（单条 SQL 合并 4 个 COUNT + 分类计数）。"""
         db = self._get_db()
-        total_nodes = db.execute("SELECT COUNT(*) AS c FROM prompt_nodes").fetchone()["c"]
-        total_templates = db.execute("SELECT COUNT(*) AS c FROM prompt_templates").fetchone()["c"]
-        total_versions = db.execute("SELECT COUNT(*) AS c FROM prompt_versions").fetchone()["c"]
-        builtin_count = db.execute(
-            "SELECT COUNT(*) AS c FROM prompt_nodes WHERE is_builtin=1"
-        ).fetchone()["c"]
+        row = db.execute("""
+            SELECT
+                (SELECT COUNT(*) FROM prompt_nodes)   AS total_nodes,
+                (SELECT COUNT(*) FROM prompt_templates) AS total_templates,
+                (SELECT COUNT(*) FROM prompt_versions)  AS total_versions,
+                (SELECT COUNT(*) FROM prompt_nodes WHERE is_builtin=1) AS builtin_count
+        """).fetchone()
+        total_nodes = row["total_nodes"]
+        builtin_count = row["builtin_count"]
         custom_count = total_nodes - builtin_count
 
         # 各分类数量
@@ -830,8 +1032,8 @@ class PromptManager:
 
         return {
             "total_nodes": total_nodes,
-            "total_templates": total_templates,
-            "total_versions": total_versions,
+            "total_templates": row["total_templates"],
+            "total_versions": row["total_versions"],
             "builtin_count": builtin_count,
             "custom_count": custom_count,
             "categories": categories,
@@ -893,11 +1095,14 @@ class PromptManager:
 # ------------------------------------------------------------------
 
 _manager_instance: Optional[PromptManager] = None
+_manager_lock = threading.Lock()
 
 
 def get_prompt_manager() -> PromptManager:
-    """获取全局 PromptManager 单例。"""
+    """获取全局 PromptManager 单例（线程安全）。"""
     global _manager_instance
     if _manager_instance is None:
-        _manager_instance = PromptManager()
+        with _manager_lock:
+            if _manager_instance is None:
+                _manager_instance = PromptManager()
     return _manager_instance

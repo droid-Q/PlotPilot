@@ -10,11 +10,8 @@
         {{ statusLabel }}
       </n-tag>
     </div>
-    <n-text depth="3" style="font-size: 11px; line-height: 1.45; display: block; margin: -4px 0 8px">
-      单本连续失败达到阈值会挂起；未启动托管时多为「正常」。
-      守护进程内另有<strong>全局</strong> LLM 熔断（防 API 雪崩），本卡无法显示其开闭；若所有书长时间不推进，请查看
-      <code style="font-size:10px">logs/autopilot_daemon.log</code>
-      或重启守护进程并等待冷却。
+    <n-text depth="3" class="breaker-lede">
+      达阈值自动挂起。全局 LLM 熔断由守护进程控制；长时间不推进请查看日志或重启守护进程。
     </n-text>
 
     <div class="breaker-body">
@@ -141,6 +138,7 @@ interface CircuitBreakerData {
 
 const props = defineProps<{
   novelId: string
+  refreshKey?: number  // 🔥 刷新信号，变化时重新拉数据
 }>()
 
 const emit = defineEmits<{
@@ -320,6 +318,11 @@ watch(() => props.novelId, () => {
   void startPolling()
 })
 
+// 🔥 刷新信号变化时重新加载（由 Dashboard 的 SSE 事件驱动）
+watch(() => props.refreshKey, (newKey) => {
+  if (newKey && newKey > 0) void loadBreakerData()
+})
+
 // 生命周期
 onMounted(() => {
   void startPolling()
@@ -334,15 +337,15 @@ onUnmounted(() => {
 .circuit-breaker-status {
   background: var(--card-color);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 12px;
+  border-radius: 10px;
+  padding: 14px 16px;
 }
 
 .breaker-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .breaker-title {
@@ -354,13 +357,20 @@ onUnmounted(() => {
 .breaker-body {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
+}
+
+.breaker-lede {
+  font-size: 11px;
+  line-height: 1.5;
+  display: block;
+  margin: 0 0 2px;
 }
 
 .status-indicator {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  align-items: flex-start;
+  gap: 14px;
 }
 
 .indicator-ring {
@@ -413,8 +423,10 @@ onUnmounted(() => {
 .status-text {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
   flex: 1;
+  min-width: 0;
+  padding-top: 4px;
 }
 
 .status-main {

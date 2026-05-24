@@ -1,6 +1,5 @@
 /**
- * 子项目 8：工作流 / 长任务 / 一致性 / 故事线
- * 后端路由实现见 `docs/superpowers/plans/2026-04-02-subproject-8-frontend-extensions.md`
+ * 工作流 / 长任务 / 一致性 / 故事线
  */
 import { WIZARD_STEP_TIMEOUT_MS } from '@/constants/wizard'
 import { apiClient, resolveHttpUrl } from './config'
@@ -31,7 +30,8 @@ export interface StorylineGraphDataDTO {
 
 export interface StorylineDTO {
   id: string
-  storyline_type: string
+  storyline_type: string       // kept for backward compat
+  role?: 'main' | 'sub' | 'dark'
   status: string
   estimated_chapter_start: number
   estimated_chapter_end: number
@@ -41,6 +41,42 @@ export interface StorylineDTO {
   current_milestone_index?: number
   last_active_chapter?: number
   progress_summary?: string
+  parent_id?: string | null
+  chapter_weight?: number
+}
+
+export type ConfluenceMergeType = 'intersect' | 'absorb' | 'reveal'
+
+export interface ConfluencePointDTO {
+  id: string
+  novel_id: string
+  source_storyline_id: string
+  target_storyline_id: string
+  target_chapter: number
+  merge_type: ConfluenceMergeType
+  context_summary: string
+  pre_reveal_hint: string
+  behavior_guards: string[]
+  resolved: boolean
+}
+
+export interface ConfluencePointCreate {
+  source_storyline_id: string
+  target_storyline_id: string
+  target_chapter: number
+  merge_type: ConfluenceMergeType
+  context_summary?: string
+  pre_reveal_hint?: string
+  behavior_guards?: string[]
+}
+
+export interface ConfluencePointUpdate {
+  target_chapter?: number
+  merge_type?: ConfluenceMergeType
+  context_summary?: string
+  pre_reveal_hint?: string
+  behavior_guards?: string[]
+  resolved?: boolean
 }
 
 export interface MainPlotOptionDTO {
@@ -69,6 +105,48 @@ export interface GenerateChapterWithContextPayload {
   chapter_number: number
   outline: string
   scene_director_result?: Record<string, unknown>
+  /** 重新生成时的改进方向（可选）；填写后 AI 会在 prompt 中看到改进要求 */
+  regeneration_guidance?: string
+}
+
+export interface ChapterDraftDTO {
+  id: string
+  novel_id: string
+  chapter_id: string
+  chapter_number: number
+  content: string
+  outline: string
+  source: 'pre_regen' | 'manual_save' | 'auto_gen' | string
+  word_count: number
+  created_at: string
+}
+
+/**
+ * POST /api/v1/novels/{novel_id}/chapters/{chapter_number}/drafts
+ * 快照当前章节内容为历史草稿（重新生成前调用）。
+ */
+export async function saveChapterDraft(
+  novelId: string,
+  chapterNumber: number,
+  source: 'pre_regen' | 'manual_save' = 'pre_regen',
+): Promise<ChapterDraftDTO> {
+  return apiClient.post<ChapterDraftDTO>(
+    `/novels/${novelId}/chapters/${chapterNumber}/drafts`,
+    { source },
+  ) as unknown as Promise<ChapterDraftDTO>
+}
+
+/**
+ * GET /api/v1/novels/{novel_id}/chapters/{chapter_number}/drafts
+ * 获取章节历史草稿列表（最新在前）。
+ */
+export async function listChapterDrafts(
+  novelId: string,
+  chapterNumber: number,
+): Promise<ChapterDraftDTO[]> {
+  return apiClient.get<ChapterDraftDTO[]>(
+    `/novels/${novelId}/chapters/${chapterNumber}/drafts`,
+  ) as unknown as Promise<ChapterDraftDTO[]>
 }
 
 export interface SceneDirectorAnalysis {
@@ -124,6 +202,8 @@ export interface GenerateChapterWorkflowResponse {
   token_count: number
   style_warnings?: StyleWarning[]
   ghost_annotations?: unknown[]
+  /** 流式 done 事件附带的指挥器节拍（与 beats_generated 一致，兜底） */
+  beats?: StreamGeneratedBeat[]
 }
 
 export interface ChunkStats {
@@ -132,8 +212,46 @@ export interface ChunkStats {
   estimated_tokens: number
 }
 
+/** 流式生成阶段下发的指挥器节拍（与后端 beats_generated 一致） */
+export interface StreamGeneratedBeat {
+  description: string
+  target_words: number
+  focus: string
+  location_id?: string
+}
+
+/** 解析 SSE beats 行（beats_generated / done.beats 共用） */
+export function parseStreamGeneratedBeats(raw: unknown): StreamGeneratedBeat[] {
+  const beats: StreamGeneratedBeat[] = []
+  if (!Array.isArray(raw)) return beats
+  for (const row of raw) {
+    if (!row || typeof row !== 'object') continue
+    const r = row as Record<string, unknown>
+    const description = String(
+      r.description ?? r.text ?? r.intent ?? r.scene_goal ?? '',
+    ).trim()
+    if (!description) continue
+    const tw = r.target_words
+    const target_words =
+      typeof tw === 'number' && Number.isFinite(tw)
+        ? tw
+        : typeof tw === 'string' && tw.trim() !== '' && Number.isFinite(Number(tw))
+          ? Number(tw)
+          : 0
+    beats.push({
+      description,
+      target_words,
+      focus: String(r.focus ?? r.type ?? 'pacing').trim() || 'pacing',
+      location_id: typeof r.location_id === 'string' ? r.location_id : undefined,
+    })
+  }
+  return beats
+}
+
 export type GenerateChapterStreamEvent =
-  | { type: 'phase'; phase: 'planning' | 'context' | 'llm' | 'post' }
+  | { type: 'phase'; phase: 'planning' | 'context' | 'outline_planning' | 'prose' | 'llm' | 'post' }
+  | { type: 'llm_chunk'; stage: string; text: string }
+  | { type: 'beats_generated'; beats: StreamGeneratedBeat[] }
   | { type: 'chunk'; text: string; stats: ChunkStats }
   | { type: 'done'; content: string; consistency_report: ConsistencyReportDTO; token_count: number; output_tokens: number; total_tokens: number; chars: number; style_warnings?: StyleWarning[]; ghost_annotations?: unknown[] }
   | { type: 'error'; message: string }
@@ -149,7 +267,7 @@ function parseSseDataLine(line: string): unknown | null {
 
 /**
  * POST /api/v1/novels/{novel_id}/generate-chapter-stream（SSE）
- * 阶段进度 + 正文流式；结束事件含 done 或 error。
+ * 阶段进度 + 正文流式；章纲节拍划分阶段可下发 llm_chunk（stage=outline_partition）；结束事件含 done 或 error。
  */
 export async function consumeGenerateChapterStream(
   novelId: string,
@@ -157,6 +275,10 @@ export async function consumeGenerateChapterStream(
   handlers: {
     onEvent?: (ev: GenerateChapterStreamEvent) => void
     onPhase?: (phase: string) => void
+    /** 节拍拆分完成（撰写正文前），与写作指挥器 Beat 一致 */
+    onBeatsGenerated?: (beats: StreamGeneratedBeat[]) => void
+    /** 非正文 LLM 的流式增量（如 outline_partition 节拍划分 JSON） */
+    onLLMChunk?: (stage: string, text: string) => void
     onChunk?: (text: string, stats?: ChunkStats) => void
     onDone?: (result: GenerateChapterWorkflowResponse) => void
     onError?: (message: string) => void
@@ -178,10 +300,8 @@ export async function consumeGenerateChapterStream(
   const dec = new TextDecoder()
   let buf = ''
   try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += dec.decode(value, { stream: true })
+    /** 排空 buf 中的完整 SSE 帧；返回是否需要结束本次 consume */
+    const drainCompleteFrames = (): boolean => {
       let sep: number
       while ((sep = buf.indexOf('\n\n')) >= 0) {
         const block = buf.slice(0, sep)
@@ -193,9 +313,23 @@ export async function consumeGenerateChapterStream(
           const typ = o.type as string
           if (typ === 'phase') {
             const ph = String(o.phase ?? '')
-            const ev: GenerateChapterStreamEvent = { type: 'phase', phase: ph as 'planning' | 'context' | 'llm' | 'post' }
+            const ev: GenerateChapterStreamEvent = {
+              type: 'phase',
+              phase: ph as 'planning' | 'context' | 'outline_planning' | 'prose' | 'llm' | 'post',
+            }
             handlers.onEvent?.(ev)
             handlers.onPhase?.(ph)
+          } else if (typ === 'beats_generated') {
+            const beats = parseStreamGeneratedBeats(o.beats)
+            const ev: GenerateChapterStreamEvent = { type: 'beats_generated', beats }
+            handlers.onEvent?.(ev)
+            handlers.onBeatsGenerated?.(beats)
+          } else if (typ === 'llm_chunk') {
+            const stage = String(o.stage ?? '')
+            const text = String(o.text ?? '')
+            const ev: GenerateChapterStreamEvent = { type: 'llm_chunk', stage, text }
+            handlers.onEvent?.(ev)
+            handlers.onLLMChunk?.(stage, text)
           } else if (typ === 'chunk') {
             const text = String(o.text ?? '')
             const stats = o.stats as ChunkStats | undefined
@@ -213,6 +347,10 @@ export async function consumeGenerateChapterStream(
               consistency_report,
               token_count: Number(o.token_count ?? 0),
             }
+            const doneBeats = parseStreamGeneratedBeats(o.beats)
+            if (doneBeats.length > 0) {
+              result.beats = doneBeats
+            }
             if (Array.isArray(o.style_warnings)) {
               result.style_warnings = o.style_warnings as StyleWarning[]
             }
@@ -228,15 +366,27 @@ export async function consumeGenerateChapterStream(
             }
             handlers.onEvent?.(ev)
             handlers.onDone?.(result)
-            return
+            return true
           } else if (typ === 'error') {
             const msg = String(o.message ?? '生成失败')
             const ev: GenerateChapterStreamEvent = { type: 'error', message: msg }
             handlers.onEvent?.(ev)
             handlers.onError?.(msg)
-            return
+            return true
           }
         }
+      }
+      return false
+    }
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (value) buf += dec.decode(value, { stream: true })
+      if (drainCompleteFrames()) return
+      if (done) {
+        buf += dec.decode()
+        drainCompleteFrames()
+        break
       }
     }
   } catch (e: unknown) {
@@ -280,10 +430,7 @@ export async function consumeHostedWriteStream(
   const dec = new TextDecoder()
   let buf = ''
   try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += dec.decode(value, { stream: true })
+    const drainFrames = (): boolean => {
       let sep: number
       while ((sep = buf.indexOf('\n\n')) >= 0) {
         const block = buf.slice(0, sep)
@@ -295,9 +442,20 @@ export async function consumeHostedWriteStream(
           handlers.onEvent?.(o)
           if (o.type === 'error') {
             handlers.onError?.(String(o.message ?? 'error'))
-            return
+            return true
           }
         }
+      }
+      return false
+    }
+    while (true) {
+      const { done, value } = await reader.read()
+      if (value) buf += dec.decode(value, { stream: true })
+      if (drainFrames()) return
+      if (done) {
+        buf += dec.decode()
+        drainFrames()
+        break
       }
     }
   } catch (e: unknown) {
@@ -328,6 +486,8 @@ export const workflowApi = {
     novelId: string,
     data: {
       storyline_type: string
+      role?: 'main' | 'sub' | 'dark'
+      parent_id?: string
       estimated_chapter_start: number
       estimated_chapter_end: number
       name?: string
@@ -431,4 +591,19 @@ export async function retrieveContext(
       scene_director_result: sceneDirectorResult,
     }
   ) as unknown as Promise<ContextPreviewResult>
+}
+
+export const confluenceApi = {
+  list(slug: string): Promise<ConfluencePointDTO[]> {
+    return apiClient.get<ConfluencePointDTO[]>(`/novels/${slug}/confluence-points`) as unknown as Promise<ConfluencePointDTO[]>
+  },
+  create(slug: string, body: ConfluencePointCreate): Promise<ConfluencePointDTO> {
+    return apiClient.post<ConfluencePointDTO>(`/novels/${slug}/confluence-points`, body) as unknown as Promise<ConfluencePointDTO>
+  },
+  update(slug: string, id: string, body: ConfluencePointUpdate): Promise<ConfluencePointDTO> {
+    return apiClient.patch<ConfluencePointDTO>(`/novels/${slug}/confluence-points/${id}`, body) as unknown as Promise<ConfluencePointDTO>
+  },
+  delete(slug: string, id: string): Promise<void> {
+    return apiClient.delete<void>(`/novels/${slug}/confluence-points/${id}`) as unknown as Promise<void>
+  },
 }

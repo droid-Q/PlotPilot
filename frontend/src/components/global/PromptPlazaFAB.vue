@@ -49,7 +49,12 @@
             </div>
           </template>
 
-          <PromptPlaza @refresh-stats="loadStats" />
+          <PromptPlaza
+            v-if="showDrawer"
+            ref="plazaRef"
+            :seed-stats="stats"
+            @refresh-stats="onPlazaRefreshStats"
+          />
         </n-drawer-content>
       </n-drawer>
     </div>
@@ -57,15 +62,47 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { NDrawer, NDrawerContent, NTag } from 'naive-ui'
-import PromptPlaza from '../workbench/PromptPlaza.vue'
+import { ref, onMounted, watch, defineAsyncComponent, h, nextTick } from 'vue'
+import { NDrawer, NDrawerContent, NTag, NSpin } from 'naive-ui'
 import { promptPlazaApi, type PromptStats } from '../../api/llmControl'
+import { usePromptPlazaBridge } from '../../stores/promptPlazaBridge'
+
+const PromptPlaza = defineAsyncComponent({
+  loader: () => import('../workbench/PromptPlaza.vue'),
+  delay: 0,
+  loadingComponent: {
+    setup() {
+      return () =>
+        h(
+          'div',
+          { style: 'display:flex;align-items:center;justify-content:center;min-height:240px' },
+          h(NSpin, { size: 'large', description: '加载提示词广场…' }),
+        )
+    },
+  },
+})
 
 const fabRef = ref<HTMLButtonElement>()
 const showDrawer = ref(false)
 const promptCount = ref(0)
 const stats = ref<PromptStats | null>(null)
+const plazaBridge = usePromptPlazaBridge()
+
+// ★ 监听 DAG → 提示词广场联动请求
+watch(() => plazaBridge.shouldOpenPlaza, (shouldOpen) => {
+  if (shouldOpen) {
+    const nodeKey = plazaBridge.consumeOpenRequest()
+    showDrawer.value = true
+    if (nodeKey) {
+      void nextTick()
+      setTimeout(() => {
+        plazaRef.value?.selectNodeByKey?.(nodeKey)
+      }, 400)
+    }
+  }
+})
+
+const plazaRef = ref<{ loadData: () => Promise<void>; selectNodeByKey: (k: string) => void } | null>(null)
 
 function toggleDrawer() {
   showDrawer.value = !showDrawer.value
@@ -86,6 +123,15 @@ async function loadStats() {
   }
 }
 
+function onPlazaRefreshStats(payload: PromptStats | null) {
+  if (payload != null) {
+    stats.value = payload
+    promptCount.value = payload.total_nodes || 0
+    return
+  }
+  void loadStats()
+}
+
 onMounted(() => {
   loadStats()
 })
@@ -94,6 +140,13 @@ onMounted(() => {
 defineExpose({
   open: () => { showDrawer.value = true },
   close: () => { showDrawer.value = false },
+  selectNode: (nodeKey: string) => {
+    showDrawer.value = true
+    void nextTick()
+    setTimeout(() => {
+      plazaRef.value?.selectNodeByKey?.(nodeKey)
+    }, 400)
+  },
 })
 </script>
 

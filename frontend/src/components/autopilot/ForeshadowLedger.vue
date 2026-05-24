@@ -4,20 +4,22 @@
       <div class="ledger-title-block">
         <span class="ledger-title">📖 伏笔雷达</span>
         <n-text depth="3" class="ledger-sub">
-          只读摘要。新增 / 编辑伏笔：侧栏「片场 → 伏笔账本」→「+ 添加伏笔」（与本卡数据同源）。
+          只读摘要 · 编辑见侧栏伏笔账本
         </n-text>
       </div>
-      <n-space :size="8">
-        <n-tag :bordered="false" size="small" type="success">
-          已回收 {{ collectedCount }}
-        </n-tag>
-        <n-tag :bordered="false" size="small" type="warning">
-          待回收 {{ pendingCount }}
-        </n-tag>
-        <n-button size="tiny" quaternary @click="showFullLedger">
-          查看全部
-        </n-button>
-      </n-space>
+      <div class="ledger-actions">
+        <n-space :size="10" :wrap="true">
+          <n-tag :bordered="false" size="small" type="success">
+            已回收 {{ collectedCount }}
+          </n-tag>
+          <n-tag :bordered="false" size="small" type="warning">
+            待回收 {{ pendingCount }}
+          </n-tag>
+          <n-button size="tiny" quaternary @click="showFullLedger">
+            查看全部
+          </n-button>
+        </n-space>
+      </div>
     </div>
 
     <div class="ledger-body">
@@ -152,6 +154,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { foreshadowApi } from '../../api/foreshadow'
+import { isRequestCanceled } from '../../utils/requestCancel'
 
 interface Foreshadow {
   id: string
@@ -166,6 +169,7 @@ interface Foreshadow {
 const props = defineProps<{
   novelId: string
   maxRecent?: number  // 最多显示几条最近伏笔，默认 5
+  refreshKey?: number  // 🔥 刷新信号，变化时重新拉数据
 }>()
 
 const foreshadows = ref<Foreshadow[]>([])
@@ -173,6 +177,8 @@ const showLedgerModal = ref(false)
 const loading = ref(false)
 
 let pollTimer: number | null = null
+// 🔥 请求取消控制器：新请求发出前取消上一个未完成的请求
+let loadAbortController: AbortController | null = null
 
 // 统计
 const totalCount = computed(() => foreshadows.value.length)
@@ -226,24 +232,47 @@ function importanceTagType(importance: string): 'default' | 'info' | 'warning' |
   return map[importance] || 'default'
 }
 
+// 🔥 伏笔列表独立超时：10 秒（远小于全局 120s，避免长时间挂起）
+const FORESHADOW_TIMEOUT_MS = 10_000
+
 // 与片场「伏笔账本」共用 foreshadow-ledger，经 foreshadowApi 与监控统计对齐
 async function loadForeshadows() {
+  // 🔥 取消上一个未完成的请求，防止并发堆积
+  if (loadAbortController) {
+    loadAbortController.abort()
+  }
+  const ac = new AbortController()
+  loadAbortController = ac
+
   loading.value = true
+  const timeoutId = setTimeout(() => ac.abort(), FORESHADOW_TIMEOUT_MS)
   try {
-    const entries = await foreshadowApi.list(props.novelId)
-    foreshadows.value = entries.map((entry) => ({
-      id: entry.id,
-      description: entry.question,
-      importance: 'medium' as const,
-      planted_chapter: entry.chapter,
-      is_collected: entry.status === 'consumed',
-      collected_chapter: entry.consumed_at_chapter ?? undefined,
-      created_at: entry.created_at,
-    }))
+    const entries = await foreshadowApi.list(props.novelId, undefined, {
+      signal: ac.signal,
+      timeout: FORESHADOW_TIMEOUT_MS,
+    })
+    // 🔥 仅在请求未被取消时更新（避免过期响应覆盖新数据）
+    if (!ac.signal.aborted) {
+      foreshadows.value = entries.map((entry) => ({
+        id: entry.id,
+        description: entry.question,
+        importance: 'medium' as const,
+        planted_chapter: entry.chapter,
+        is_collected: entry.status === 'consumed',
+        collected_chapter: entry.consumed_at_chapter ?? undefined,
+        created_at: entry.created_at,
+      }))
+    }
   } catch (err) {
+    if (isRequestCanceled(err)) {
+      return
+    }
     console.error('Failed to load foreshadows:', err)
-    foreshadows.value = []
   } finally {
+    clearTimeout(timeoutId)
+    if (loadAbortController === ac) {
+      loadAbortController = null
+    }
     loading.value = false
   }
 }
@@ -253,12 +282,14 @@ function showFullLedger() {
   showLedgerModal.value = true
 }
 
-// 定时轮询（每 20 秒）
+// 🔥 定时轮询间隔从 20s 提升到 30s（伏笔数据变化不频繁，降低 DB 压力）
+const POLL_INTERVAL_MS = 30_000
+
 function startPolling() {
   loadForeshadows()
   pollTimer = window.setInterval(() => {
     loadForeshadows()
-  }, 20000)
+  }, POLL_INTERVAL_MS)
 }
 
 function stopPolling() {
@@ -266,12 +297,22 @@ function stopPolling() {
     clearInterval(pollTimer)
     pollTimer = null
   }
+  // 🔥 停止轮询时取消进行中的请求
+  if (loadAbortController) {
+    loadAbortController.abort()
+    loadAbortController = null
+  }
 }
 
 // 监听
 watch(() => props.novelId, () => {
   stopPolling()
   startPolling()
+})
+
+// 🔥 刷新信号变化时重新加载（由 Dashboard 的 SSE 事件驱动）
+watch(() => props.refreshKey, (newKey) => {
+  if (newKey && newKey > 0) void loadForeshadows()
 })
 
 // 生命周期
@@ -288,23 +329,30 @@ onUnmounted(() => {
 .foreshadow-ledger {
   background: var(--card-color);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 12px;
+  border-radius: 10px;
+  padding: 14px 16px;
 }
 
 .ledger-header {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
   margin-bottom: 12px;
 }
 
 .ledger-title-block {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   min-width: 0;
+}
+
+.ledger-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
 
 .ledger-title {
@@ -315,33 +363,33 @@ onUnmounted(() => {
 
 .ledger-sub {
   font-size: 11px;
-  line-height: 1.35;
+  line-height: 1.45;
 }
 
 .ledger-body {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
+  gap: 10px;
 }
 
 .stat-card {
   background: var(--color-target-modal);
   border: 1px solid var(--border-color);
-  border-radius: 6px;
-  padding: 8px;
+  border-radius: 8px;
+  padding: 10px 8px;
   text-align: center;
 }
 
 .stat-label {
   font-size: 11px;
   color: var(--text-color-3);
-  margin-bottom: 4px;
+  margin-bottom: 6px;
 }
 
 .stat-value {

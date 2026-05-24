@@ -1,10 +1,14 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { NConfigProvider, NMessageProvider, NDialogProvider, zhCN, dateZhCN, darkTheme } from 'naive-ui'
+import AppSettingsModal from './components/settings/AppSettingsModal.vue'
 import type { GlobalThemeOverrides } from 'naive-ui'
 import { useThemeStore } from './stores/themeStore'
+import { useFontSizeStore, scaledUiPx, type FontSizePreset } from './stores/fontSizeStore'
+import { NAIVE_DENSITY_BASE } from './design/layoutDensity'
 
 const themeStore = useThemeStore()
+const fontSizeStore = useFontSizeStore()
 
 const naiveTheme = computed(() =>
   themeStore.isDark ? darkTheme : undefined
@@ -65,37 +69,51 @@ const ANCHOR_PALETTE = {
   selectBorder:   '#c9a227',
 } as const
 
-// 形状与间距等静态覆盖，与主题无关，freeze 后永不重建
-const SHAPE_OVERRIDES: GlobalThemeOverrides = Object.freeze({
-  common: {
-    borderRadius:      '10px',
-    borderRadiusSmall: '8px',
-    fontSize:          '14px',
-    fontSizeMedium:    '15px',
-    lineHeight:        '1.55',
-    heightMedium:      '38px',
-  },
-  Card:       { borderRadius: '14px', paddingMedium: '20px' },
-  Button:     { borderRadiusMedium: '10px' },
-  Input:      { borderRadius: '10px' },
-  Scrollbar:  { width: '8px', height: '8px', borderRadius: '4px' },
-  DataTable:  { borderRadius: '12px', thFontWeight: '600' },
-  Tag:        { borderRadius: '6px' },
-  Progress:   { railBorderRadius: '4px', fillBorderRadius: '4px' },
-  Drawer:     { bodyPadding: '0' },
-  Alert:      { border: 'none' },
-})
+/** Naive UI 形体：随字体档位缩放，基准见 design/layoutDensity */
+function naiveShapeOverrides(fz: FontSizePreset): GlobalThemeOverrides {
+  const r = scaledUiPx(NAIVE_DENSITY_BASE.borderRadius, fz)
+  const rs = scaledUiPx(NAIVE_DENSITY_BASE.borderRadiusSmall, fz)
+  const cr = scaledUiPx(NAIVE_DENSITY_BASE.cardBorderRadius, fz)
+  const sb = scaledUiPx(NAIVE_DENSITY_BASE.scrollbarWidth, fz)
+  return {
+    common: {
+      borderRadius: r,
+      borderRadiusSmall: rs,
+      fontSize: scaledUiPx(NAIVE_DENSITY_BASE.fontSize, fz),
+      fontSizeMedium: scaledUiPx(NAIVE_DENSITY_BASE.fontSizeMedium, fz),
+      lineHeight: NAIVE_DENSITY_BASE.lineHeight,
+      heightMedium: scaledUiPx(NAIVE_DENSITY_BASE.heightMedium, fz),
+    },
+    Card: {
+      borderRadius: cr,
+      paddingMedium: scaledUiPx(NAIVE_DENSITY_BASE.cardPaddingMedium, fz),
+    },
+    Button: { borderRadiusMedium: r },
+    Input: { borderRadius: r },
+    Scrollbar: { width: sb, height: sb, borderRadius: scaledUiPx(3, fz) },
+    DataTable: { borderRadius: r, thFontWeight: '600' },
+    Tag: { borderRadius: scaledUiPx(5, fz) },
+    Progress: {
+      railBorderRadius: scaledUiPx(3, fz),
+      fillBorderRadius: scaledUiPx(3, fz),
+    },
+    Drawer: { bodyPadding: '0' },
+    Alert: { border: 'none' },
+  }
+}
 
-// ─── 只有颜色部分是动态的，量少性能好 ─────────────────────────────────────
+// ─── 颜色 + 字号档位是动态的，量少性能好 ─────────────────────────────────────
 const themeOverrides = computed<GlobalThemeOverrides>(() => {
   const p = themeStore.isAnchor ? ANCHOR_PALETTE
           : themeStore.isDark   ? DARK_PALETTE
           :                       LIGHT_PALETTE
+  const fz = fontSizeStore.preset
 
+  const shape = naiveShapeOverrides(fz)
   return {
-    ...SHAPE_OVERRIDES,
+    ...shape,
     common: {
-      ...SHAPE_OVERRIDES.common,
+      ...shape.common,
       primaryColor:        p.primary,
       primaryColorHover:   p.primaryHover,
       primaryColorPressed: p.primaryPressed,
@@ -123,14 +141,14 @@ const themeOverrides = computed<GlobalThemeOverrides>(() => {
         },
       },
     },
-    Drawer: { ...SHAPE_OVERRIDES.Drawer, color: p.drawerBg },
+    Drawer: { ...shape.Drawer, color: p.drawerBg },
     Tabs: {
       tabTextColorActiveLine: p.primary,
       tabTextColorHoverLine:  p.text2,
       barColor:               p.primary,
     },
     Switch: { railColorActive: p.primary },
-    Alert:  { ...SHAPE_OVERRIDES.Alert, color: p.surface },
+    Alert:  { ...shape.Alert, color: p.surface },
     Form:   { labelTextColorTop: p.text2 },
   }
 })
@@ -150,6 +168,7 @@ const themeOverrides = computed<GlobalThemeOverrides>(() => {
             <component :is="Component" />
           </transition>
         </router-view>
+        <AppSettingsModal />
       </n-dialog-provider>
     </n-message-provider>
   </n-config-provider>

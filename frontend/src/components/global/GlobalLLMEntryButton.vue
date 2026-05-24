@@ -72,16 +72,6 @@
                   }}
                 </n-tag>
               </div>
-              <div class="modal-header-actions">
-                <n-button
-                  v-if="drawerTab === 'llm'"
-                  size="small"
-                  secondary
-                  @click="modelSettingsModalRef?.open()"
-                >
-                  核心引擎
-                </n-button>
-              </div>
             </div>
 
             <div class="ai-console-header-stack">
@@ -139,6 +129,7 @@
                    ══════════════════════════════════ -->
               <div v-show="drawerTab === 'llm'">
                 <LLMControlPanel
+                  v-if="llmPanelInitialized"
                   scroll-state-key="global-modal"
                   @panel-updated="handlePanelUpdated"
                 />
@@ -314,14 +305,12 @@
         </template>
       </n-modal>
 
-      <!-- 核心引擎配置模态框 -->
-      <ModelSettingsModal ref="modelSettingsModalRef" />
     </teleport>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { NModal, NTag, NButton, NSwitch, NForm, NFormItem, NInput, NSelect, NSpin, NAlert, NProgress } from 'naive-ui'
 import {
   llmControlApi,
@@ -330,7 +319,6 @@ import {
 } from '../../api/llmControl'
 import { settingsApi, type EmbeddingConfig, type ExtensionsStatus, type InstallEvent } from '../../api/settings'
 import LLMControlPanel from '../workbench/LLMControlPanel.vue'
-import ModelSettingsModal from '../settings/ModelSettingsModal.vue'
 
 type Appearance = 'sidebar' | 'topbar'
 type DrawerTab = 'embedding' | 'llm'
@@ -344,10 +332,10 @@ const props = withDefaults(defineProps<{
 })
 
 const showPanel = ref(false)
+const llmPanelInitialized = ref(false) // 缓存 LLM 面板是否已初始化
 const drawerTab = ref<DrawerTab>('llm')
 const runtimeLoading = ref(false)
 const runtimeSummary = ref<LLMRuntimeSummary | null>(null)
-const modelSettingsModalRef = ref<InstanceType<typeof ModelSettingsModal> | null>(null)
 
 /** 与提示词广场入口弹窗一致的居中卡片尺寸 */
 const aiConsoleModalStyle = {
@@ -375,7 +363,10 @@ function handlePanelUpdated(data: LLMControlPanelData) {
 
 function handleModalShowChange(value: boolean) {
   showPanel.value = value
-  if (value) void refreshRuntimeSummary()
+  if (value) {
+    llmPanelInitialized.value = true // 首次打开时初始化，之后保持
+    // ★ 优化：LLMControlPanel.onMounted 会自己 loadPanel，不重复请求
+  }
 }
 
 const appearance = computed(() => props.appearance)
@@ -501,11 +492,21 @@ async function handleFetchEmbeddingModels() {
 }
 
 function openPanel() {
-  void refreshRuntimeSummary()
-  void loadEmbeddingConfig()
-  void checkExtensionsStatus()
+  llmPanelInitialized.value = true // 首次打开时初始化，之后保持
+  // ★ 优化：不再同时 fire 3 个请求。LLMControlPanel.onMounted 会自己 loadPanel，
+  // refreshRuntimeSummary 重复了。embedding 和 extensions 延迟到切换 tab 时加载。
   showPanel.value = true
 }
+
+// ── 延迟加载：切换到 embedding tab 时才加载配置和扩展状态 ──
+let embeddingLoaded = false
+watch(drawerTab, (tab) => {
+  if (tab === 'embedding' && !embeddingLoaded) {
+    embeddingLoaded = true
+    void loadEmbeddingConfig()
+    void checkExtensionsStatus()
+  }
+})
 </script>
 
 <style scoped>
@@ -811,12 +812,6 @@ function openPanel() {
   font-size: 16px;
   font-weight: 700;
   color: var(--app-text-primary);
-}
-
-.modal-header-actions {
-  display: flex;
-  gap: 6px;
-  flex-shrink: 0;
 }
 
 .modal-body.ai-console-modal-body {

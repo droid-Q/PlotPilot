@@ -1,4 +1,5 @@
 import { apiClient } from './config'
+import type { GuardrailCheckResponse } from './engineCore'
 
 export interface ChapterDTO {
   id: string
@@ -12,8 +13,17 @@ export interface ChapterDTO {
   updated_at: string
 }
 
+export interface ChapterMicroBeatPayload {
+  description: string
+  target_words?: number
+  focus?: string
+  location_id?: string
+}
+
 export interface UpdateChapterRequest {
   content: string
+  /** 指挥器微观节拍；保存时写入 chapter_summaries.micro_beats */
+  micro_beats?: ChapterMicroBeatPayload[]
 }
 
 export interface ChapterReviewDTO {
@@ -60,6 +70,17 @@ export const chapterApi = {
   updateChapter: (novelId: string, chapterNumber: number, data: UpdateChapterRequest) =>
     apiClient.put<ChapterDTO>(`/novels/${novelId}/chapters/${chapterNumber}`, data) as Promise<ChapterDTO>,
 
+  /** 仅落库指挥器微观节拍（流式生成完成后可先于正文保存调用） */
+  upsertChapterMicroBeats: (
+    novelId: string,
+    chapterNumber: number,
+    micro_beats: ChapterMicroBeatPayload[],
+  ) =>
+    apiClient.put<{ ok: boolean; chapter_number: number; count: number }>(
+      `/novels/${novelId}/chapters/${chapterNumber}/micro-beats`,
+      { micro_beats },
+    ) as Promise<{ ok: boolean; chapter_number: number; count: number }>,
+
   /**
    * Get chapter review
    * GET /api/v1/novels/{novelId}/chapters/{chapterNumber}/review
@@ -87,6 +108,20 @@ export const chapterApi = {
    */
   getChapterStructure: (novelId: string, chapterNumber: number) =>
     apiClient.get<ChapterStructureDTO>(`/novels/${novelId}/chapters/${chapterNumber}/structure`) as Promise<ChapterStructureDTO>,
+
+  /**
+   * 保存后自动护栏快照（建议模式）。尚无快照时服务端返回 JSON null（HTTP 200）。
+   * GET /novels/{novelId}/chapters/{chapterNumber}/guardrail-snapshot
+   */
+  getGuardrailSnapshot: async (
+    novelId: string,
+    chapterNumber: number
+  ): Promise<GuardrailCheckResponse | null> => {
+    const data = (await apiClient.get(
+      `/novels/${novelId}/chapters/${chapterNumber}/guardrail-snapshot`
+    )) as GuardrailCheckResponse | null
+    return data ?? null
+  },
 
   /**
    * 确保章节在正文库中存在；若不存在则创建空白记录

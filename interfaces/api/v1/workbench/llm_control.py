@@ -18,7 +18,7 @@ from application.ai.llm_control_service import (
     LLMControlService,
 )
 from infrastructure.ai.provider_factory import LLMProviderFactory
-from infrastructure.ai.prompt_manager import get_prompt_manager
+from infrastructure.ai.prompt_manager import get_prompt_manager, BUILTIN_CATEGORIES
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/llm-control', tags=['llm-control'])
@@ -163,13 +163,38 @@ async def list_models(payload: ModelListRequest) -> ModelListResponse:
 
 # ---------- 核心 CRUD + 测试 ----------
 
+# LLM 控制面板进程级缓存（写操作时失效）
+_llm_panel_cache: Optional[LLMControlPanelData] = None
+_llm_panel_cache_ts: float = 0.0
+_LLM_PANEL_CACHE_TTL = 10.0  # 10 秒；配置低频变化，短 TTL 即可
+
+
+def _invalidate_llm_panel_cache() -> None:
+    """写操作后使缓存失效。"""
+    global _llm_panel_cache, _llm_panel_cache_ts
+    _llm_panel_cache = None
+    _llm_panel_cache_ts = 0.0
+
+
 @router.get('', response_model=LLMControlPanelData)
 async def get_llm_control_panel() -> LLMControlPanelData:
-    return _service.get_control_panel_data()
+    """获取 LLM 控制面板数据（带短 TTL 进程缓存）。"""
+    import time
+    global _llm_panel_cache, _llm_panel_cache_ts
+
+    now = time.time()
+    if _llm_panel_cache is not None and (now - _llm_panel_cache_ts) < _LLM_PANEL_CACHE_TTL:
+        return _llm_panel_cache
+
+    data = _service.get_control_panel_data()
+    _llm_panel_cache = data
+    _llm_panel_cache_ts = now
+    return data
 
 
 @router.put('', response_model=LLMControlPanelData)
 async def save_llm_control_panel(config: LLMControlConfig) -> LLMControlPanelData:
+    _invalidate_llm_panel_cache()
     saved = _service.save_config(config)
     return LLMControlPanelData(
         config=saved,
@@ -229,6 +254,61 @@ class CreateTemplateRequest(BaseModel):
 # 统计 & 分类
 # ------------------------------------------------------------------
 
+# 进程级缓存：提示词广场首屏聚合数据（写操作时失效）
+_plaza_cache: Dict[str, Any] = {}
+_plaza_cache_ts: float = 0.0
+_PLAZA_CACHE_TTL = 60.0  # 秒；提示词数据变化低频，1 分钟缓存足够
+
+
+def _invalidate_plaza_cache() -> None:
+    """写操作后使缓存失效。"""
+    global _plaza_cache, _plaza_cache_ts
+    _plaza_cache = {}
+    _plaza_cache_ts = 0.0
+
+
+@router.get('/prompts/plaza-init')
+async def plaza_init() -> Dict[str, Any]:
+    """提示词广场首屏聚合接口（stats + categories + nodes 一次返回）。
+
+    将前端原来 3 次请求合并为 1 次，减少 HTTP 往返与 SQLite 并发。
+    带进程级 TTL 缓存，避免全托管写 DB 期间的锁竞争。
+    """
+    import time
+    global _plaza_cache, _plaza_cache_ts
+
+    now = time.time()
+    if _plaza_cache and (now - _plaza_cache_ts) < _PLAZA_CACHE_TTL:
+        return _plaza_cache
+
+    mgr = get_prompt_manager()
+    mgr.ensure_seeded()
+
+    # 一次取 stats，复用到 categories（消除原 categories-info 对 get_stats 的重复调用）
+    stats = mgr.get_stats()
+    cat_counts = stats.get("categories", {})
+    categories = []
+    for cat_def in BUILTIN_CATEGORIES:
+        info = dict(cat_def)
+        info["count"] = cat_counts.get(cat_def["key"], 0)
+        categories.append(info)
+
+    # 按分类分组节点
+    grouped = mgr.get_nodes_by_category()
+    nodes_by_category: Dict[str, List[Dict[str, Any]]] = {}
+    for cat, nodes in grouped.items():
+        nodes_by_category[cat] = [n.to_dict() for n in nodes]
+
+    result = {
+        "stats": stats,
+        "categories": categories,
+        "nodes_by_category": nodes_by_category,
+    }
+    _plaza_cache = result
+    _plaza_cache_ts = now
+    return result
+
+
 @router.get('/prompts/stats')
 async def get_prompt_stats() -> Dict[str, Any]:
     """获取提示词库统计信息。"""
@@ -266,6 +346,7 @@ async def create_template(payload: CreateTemplateRequest) -> Dict[str, Any]:
         description=payload.description,
         category=payload.category,
     )
+    _invalidate_plaza_cache()
     return {"status": "ok", "template": tmpl.to_dict()}
 
 
@@ -310,7 +391,7 @@ async def list_prompts_by_category() -> Dict[str, List[Dict[str, Any]]]:
 
 
 class ImportPayload(BaseModel):
-    """导入请求体：接受 prompts_defaults.json 格式或导出格式。"""
+    """导入请求体：接受广场导出 JSON 格式或含 prompts 数组的旧版结构。"""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -322,7 +403,7 @@ class ImportPayload(BaseModel):
 
 @router.get("/prompts/export")
 async def export_prompts() -> Dict[str, Any]:
-    """导出所有提示词为 JSON（兼容 prompts_defaults.json 格式）。"""
+    """导出所有提示词为 JSON（与提示词广场 / 备份兼容）。"""
     from datetime import datetime
 
     mgr = get_prompt_manager()
@@ -459,6 +540,7 @@ async def import_prompts(payload: ImportPayload) -> Dict[str, Any]:
             errors.append(f"{key_hint}: {exc}")
             skipped_count += 1
 
+    _invalidate_plaza_cache()
     return {
         "status": "ok",
         "summary": {
@@ -514,6 +596,7 @@ async def create_node(payload: CreateNodeRequest) -> Dict[str, Any]:
         description=payload.description,
         category=payload.category,
     )
+    _invalidate_plaza_cache()
     return {"status": "ok", "node": node.to_dict()}
 
 
@@ -526,6 +609,7 @@ async def delete_node(node_id: str) -> Dict[str, str]:
     if node and node.is_builtin:
         raise HTTPException(status_code=403, detail="Cannot delete built-in prompt")
     success = mgr.delete_node(node_id)
+    _invalidate_plaza_cache()
     if not success:
         raise HTTPException(status_code=404, detail="Node not found")
     return {"status": "ok", "node_id": node_id}
@@ -575,6 +659,7 @@ async def update_node(node_key: str, payload: PromptUpdateRequest) -> Dict[str, 
         description=payload.description,
         tags=payload.tags,
     )
+    _invalidate_plaza_cache()
     return {
         "status": "ok",
         "node": updated.to_dict() if updated else None,
@@ -595,6 +680,7 @@ async def rollback_node(node_key: str, version_id: str) -> Dict[str, Any]:
     if not rolled_back:
         raise HTTPException(status_code=400, detail="Rollback failed")
 
+    _invalidate_plaza_cache()
     return {
         "status": "ok",
         "node": rolled_back.to_dict(),
@@ -628,3 +714,307 @@ async def render_prompt(
     if result is None:
         raise HTTPException(status_code=404, detail=f"Prompt '{node_key}' not found")
     return result
+
+
+# ======================================================================
+# CPMS 增强端点：单节点调试 / COT 展示 / 沙盒渲染校验 / 变量注册表 / 绑定管理
+# ======================================================================
+
+
+class PromptDebugRequest(BaseModel):
+    """请求体：单节点调试渲染（含诊断信息）。"""
+
+    variables: Dict[str, Any] = Field(default_factory=dict)
+    validate_schemas: bool = True
+
+
+class PromptSandboxRequest(BaseModel):
+    """请求体：沙盒渲染校验（保存前预检）。"""
+
+    system: str = ""
+    user_template: str = ""
+    variables: Dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post('/prompts/{node_key}/debug')
+async def debug_prompt_node(
+    node_key: str,
+    payload: PromptDebugRequest,
+) -> Dict[str, Any]:
+    """单节点调试：渲染 + 完整诊断信息（缺失变量、类型校验、渲染耗时）。
+
+    用于提示词广场的"调试模式"——用户输入变量后实时查看渲染结果和诊断。
+    """
+    from infrastructure.ai.prompt_registry import get_prompt_registry
+
+    registry = get_prompt_registry()
+
+    # 获取节点
+    node = registry.get_node(node_key)
+    if node is None:
+        # 尝试按 ID
+        mgr = get_prompt_manager()
+        mgr.ensure_seeded()
+        node = mgr.get_node(node_key, by_key=False)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"Prompt node '{node_key}' not found")
+
+    # 使用 PromptRegistry.render 获取完整 RenderResult
+    import time as _time
+    t0 = _time.monotonic()
+    result = registry.render(
+        node_key if registry.get_node(node_key) else node.node_key,
+        variables=payload.variables,
+        validate_schemas=payload.validate_schemas,
+    )
+    elapsed_ms = int((_time.monotonic() - t0) * 1000)
+
+    if result is None:
+        return {
+            "success": False,
+            "error": "渲染失败：模板引擎返回 None",
+            "node_key": node_key,
+            "elapsed_ms": elapsed_ms,
+        }
+
+    return {
+        "success": result.success,
+        "system": result.system,
+        "user": result.user,
+        "diagnostics": {
+            "errors": result.errors,
+            "warnings": result.warnings,
+            "missing_variables": result.missing_variables,
+            "rendered_variables": result.rendered_variables,
+            "missing_required": result.missing_required,
+        },
+        "node_key": node_key,
+        "node_name": node.name,
+        "variables_provided": list(payload.variables.keys()),
+        "elapsed_ms": elapsed_ms,
+    }
+
+
+@router.get('/prompts/{node_key}/chain')
+async def get_prompt_chain(node_key: str) -> Dict[str, Any]:
+    """COT 展示：获取节点的完整调用链（绑定关系 + 上下游依赖）。
+
+    返回：
+    - 节点本身信息
+    - 绑定的工作流/服务
+    - 被哪些其他节点引用（依赖图）
+    - 变量来源追踪
+    """
+    from infrastructure.ai.prompt_registry import get_prompt_registry
+
+    registry = get_prompt_registry()
+
+    node = registry.get_node(node_key)
+    if node is None:
+        mgr = get_prompt_manager()
+        mgr.ensure_seeded()
+        node = mgr.get_node(node_key, by_key=False)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"Prompt node '{node_key}' not found")
+
+    # 获取绑定信息（遍历所有工作流查找引用此节点的绑定）
+    bindings = []
+    reverse_deps = []
+    try:
+        from infrastructure.ai.prompt_binding_store import get_binding_store
+        store = get_binding_store()
+        for wf in store.list_workflows():
+            for b in wf.bindings:
+                if b.node_key == node.node_key:
+                    bindings.append({
+                        "workflow_id": b.workflow_id,
+                        "workflow_name": wf.name,
+                        "slot": b.slot,
+                        "priority": b.priority,
+                        "enabled": b.enabled,
+                    })
+                    reverse_deps.append({
+                        "workflow_id": b.workflow_id,
+                        "workflow_name": wf.name,
+                        "slot": b.slot,
+                    })
+    except Exception as exc:
+        logger.debug("绑定查询失败: %s", exc)
+
+    # 变量来源追踪
+    variable_sources = []
+    for var_def in node.variables:
+        var_name = var_def.get("name", "")
+        var_source = var_def.get("source", "seed")
+        variable_sources.append({
+            "name": var_name,
+            "type": var_def.get("type", "string"),
+            "source": var_source,
+            "required": var_def.get("required", False),
+            "default": var_def.get("default"),
+        })
+
+    return {
+        "node_key": node.node_key,
+        "node_name": node.name,
+        "category": node.category,
+        "source": node.source,
+        "bindings": bindings,
+        "reverse_dependencies": reverse_deps,
+        "variables": variable_sources,
+        "version_count": len(node.versions) if hasattr(node, 'versions') and node.versions else 1,
+    }
+
+
+@router.post('/prompts/{node_key}/sandbox')
+async def sandbox_render(
+    node_key: str,
+    payload: PromptSandboxRequest,
+) -> Dict[str, Any]:
+    """沙盒渲染校验：保存前预检。
+
+    用户在提示词广场编辑模板后，保存前先用沙盒渲染验证：
+    - 语法是否正确（Jinja2 / format_map）
+    - 变量引用是否匹配
+    - 渲染结果预览
+    """
+    from infrastructure.ai.prompt_template_engine import get_template_engine
+
+    engine = get_template_engine()
+
+    # 使用传入的 system/user_template 进行沙盒渲染
+    import time as _time
+    t0 = _time.monotonic()
+    try:
+        result = engine.render(
+            system_template=payload.system,
+            user_template=payload.user_template,
+            variables=payload.variables,
+        )
+    except Exception as exc:
+        return {
+            "valid": False,
+            "error": f"模板语法错误: {exc}",
+            "system_preview": "",
+            "user_preview": "",
+        }
+    elapsed_ms = int((_time.monotonic() - t0) * 1000)
+
+    # 提取模板中引用的变量名
+    import re
+    system_vars = set(re.findall(r'\{(\w+)\}', payload.system))
+    user_vars = set(re.findall(r'\{(\w+)\}', payload.user_template))
+    all_template_vars = system_vars | user_vars
+    provided_vars = set(payload.variables.keys())
+    missing_vars = all_template_vars - provided_vars
+
+    return {
+        "valid": result.success and len(result.errors) == 0,
+        "errors": result.errors,
+        "warnings": result.warnings,
+        "missing_variables": list(missing_vars),
+        "missing_required": result.missing_required,
+        "system_preview": (result.system or "")[:2000],
+        "user_preview": (result.user or "")[:2000],
+        "template_variables": {
+            "system": list(system_vars),
+            "user": list(user_vars),
+            "all": list(all_template_vars),
+        },
+        "provided_variables": list(provided_vars),
+        "elapsed_ms": elapsed_ms,
+    }
+
+
+@router.get('/prompts/variables')
+async def list_variables(
+    node_key: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """全局变量注册表：列出所有变量 Schema。
+
+    可选按 node_key 过滤特定节点的变量。
+    """
+    from infrastructure.ai.variable_registry import get_variable_registry
+
+    vreg = get_variable_registry()
+    vreg.seed_builtin_variables()
+
+    if node_key:
+        # 过滤特定节点
+        from infrastructure.ai.prompt_registry import get_prompt_registry
+        registry = get_prompt_registry()
+        node = registry.get_node(node_key)
+        if node is None:
+            return []
+        return [
+            {
+                "name": var_def.get("name", ""),
+                "display_name": var_def.get("display_name", var_def.get("desc", "")),
+                "type": var_def.get("type", "string"),
+                "required": var_def.get("required", False),
+                "default": var_def.get("default"),
+                "description": var_def.get("desc", ""),
+                "source": var_def.get("source", ""),
+                "scope": var_def.get("scope", "chapter"),
+                "enum_values": var_def.get("enum_values", []),
+            }
+            for var_def in node.variables
+        ]
+
+    # 返回全部已注册的变量
+    all_schemas = vreg.get_all_schemas()
+    return [
+        {
+            "name": s.name,
+            "display_name": s.display_name,
+            "type": s.type.value if hasattr(s.type, 'value') else str(s.type),
+            "required": s.required,
+            "default": s.default,
+            "description": s.description,
+            "source": s.source,
+            "scope": s.scope.value if hasattr(s.scope, 'value') else str(s.scope),
+            "enum_values": s.enum_values,
+        }
+        for s in all_schemas.values()
+    ]
+
+
+@router.get('/prompts/{node_key}/bindings')
+async def get_node_bindings(node_key: str) -> Dict[str, Any]:
+    """获取节点的绑定关系（哪些工作流/服务使用了此提示词）。"""
+    from infrastructure.ai.prompt_registry import get_prompt_registry
+
+    registry = get_prompt_registry()
+    node = registry.get_node(node_key)
+    if node is None:
+        mgr = get_prompt_manager()
+        mgr.ensure_seeded()
+        node = mgr.get_node(node_key, by_key=False)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"Prompt node '{node_key}' not found")
+
+    bindings = []
+    try:
+        from infrastructure.ai.prompt_binding_store import get_binding_store
+        store = get_binding_store()
+        for wf in store.list_workflows():
+            for b in wf.bindings:
+                if b.node_key == node.node_key:
+                    bindings.append({
+                        "id": b.id,
+                        "workflow_id": b.workflow_id,
+                        "workflow_name": wf.name,
+                        "node_key": b.node_key,
+                        "slot": b.slot,
+                        "priority": b.priority,
+                        "enabled": b.enabled,
+                    })
+    except Exception as exc:
+        logger.debug("绑定查询失败: %s", exc)
+
+    return {
+        "node_key": node.node_key,
+        "node_name": node.name,
+        "bindings": bindings,
+        "binding_count": len(bindings),
+    }

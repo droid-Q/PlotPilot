@@ -41,8 +41,38 @@
       </div>
     </div>
 
-    <!-- 分类标签栏 -->
-    <div class="category-tabs" v-if="categories.length">
+    <!-- 主标签切换 -->
+    <div class="main-tabs">
+      <div
+        class="main-tab"
+        :class="{ 'is-active': mainTab === 'plaza' }"
+        @click="mainTab = 'plaza'"
+      >
+        📝 提示词广场
+      </div>
+      <div
+        class="main-tab"
+        :class="{ 'is-active': mainTab === 'anti-ai' }"
+        @click="mainTab = 'anti-ai'"
+      >
+        🛡️ Anti-AI 防御
+      </div>
+    </div>
+
+    <!-- Anti-AI 仪表板 -->
+    <Suspense v-if="mainTab === 'anti-ai'">
+      <template #default>
+        <AntiAIDashboard />
+      </template>
+      <template #fallback>
+        <div class="loading-wrap">
+          <n-spin size="medium">加载防御面板…</n-spin>
+        </div>
+      </template>
+    </Suspense>
+
+    <!-- 分类标签栏（仅提示词广场模式显示） -->
+    <div class="category-tabs" v-if="categories.length && mainTab === 'plaza'">
       <div
         class="category-tab"
         :class="{ 'is-active': activeCategory === null }"
@@ -62,8 +92,8 @@
       </div>
     </div>
 
-    <!-- 主内容区 -->
-    <div class="plaza-content" v-if="!loading">
+    <!-- 主内容区（仅提示词广场模式显示） -->
+    <div class="plaza-content" v-if="!loading && mainTab === 'plaza'">
       <!-- 搜索结果模式 -->
       <template v-if="searchQuery.trim()">
         <div class="search-results-header" v-if="filteredNodes.length">
@@ -103,8 +133,8 @@
       <n-empty v-if="Object.keys(groupedNodes).length === 0 && !loading" description="暂无提示词数据" />
     </div>
 
-    <!-- 加载状态 -->
-    <div class="loading-wrap" v-else>
+    <!-- 加载状态（仅提示词广场模式下加载中显示） -->
+    <div class="loading-wrap" v-if="loading && mainTab === 'plaza'">
       <n-spin size="medium">正在加载提示词库...</n-spin>
     </div>
 
@@ -142,12 +172,21 @@
 
           <!-- 弹窗内容 -->
           <div class="detail-modal-body">
-            <PromptDetailPanel
-              v-if="showDetailModal && selectedNode"
-              :node-key="selectedNode.node_key"
-              @updated="onNodeUpdated"
-              @close="closeDetail"
-            />
+            <Suspense>
+              <template #default>
+                <PromptDetailPanel
+                  v-if="showDetailModal && selectedNode"
+                  :node-key="selectedNode.node_key"
+                  @updated="onNodeUpdated"
+                  @close="closeDetail"
+                />
+              </template>
+              <template #fallback>
+                <div class="detail-panel-fallback">
+                  <n-spin size="medium" description="加载编辑器…" />
+                </div>
+              </template>
+            </Suspense>
           </div>
         </div>
       </div>
@@ -166,7 +205,7 @@
     >
       <div class="import-body">
         <p class="import-hint">
-          支持 <code>prompts_defaults.json</code> 全量或仅含 <code>prompts</code> 数组。按 <code>id</code> 匹配已有节点并更新。
+          支持广场导出 JSON 或仅含 <code>prompts</code> 数组。按 <code>id</code> 匹配已有节点并更新。
         </p>
         <n-upload
           accept=".json,application/json"
@@ -227,24 +266,36 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, reactive, nextTick } from 'vue'
+import { ref, computed, onMounted, reactive, nextTick, watch, defineAsyncComponent } from 'vue'
 import {
   NButton, NTag, NInput, NSpin, NEmpty,
   NModal, NForm, NFormItem, NSelect, NUpload, useMessage,
 } from 'naive-ui'
-import { promptPlazaApi, type PromptNode, type PromptCategoryInfo, type PromptStats } from '../../api/llmControl'
+import { promptPlazaApi, type PromptNode, type PromptCategoryInfo, type PromptStats, type PlazaInitResult } from '../../api/llmControl'
 import NodeCard from './promptPlaza/NodeCard.vue'
-import PromptDetailPanel from './promptPlaza/PromptDetailPanel.vue'
+
+/** 详情 / Anti-AI 惰性分包，缩短首屏解析与请求前排队的链路 */
+const PromptDetailPanel = defineAsyncComponent(() => import('./promptPlaza/PromptDetailPanel.vue'))
+const AntiAIDashboard = defineAsyncComponent(() => import('./promptPlaza/AntiAIDashboard.vue'))
 
 const message = useMessage()
 
+const props = withDefaults(
+  defineProps<{
+    /** 由入口预拉的统计，避免与 loadData 重复请求 getStats */
+    seedStats?: PromptStats | null
+  }>(),
+  { seedStats: null },
+)
+
 const emit = defineEmits<{
-  (e: 'refresh-stats'): void
+  (e: 'refresh-stats', payload: PromptStats | null): void
 }>()
 
 // ---- 状态 ----
 const loading = ref(true)
 const searchQuery = ref('')
+const mainTab = ref<'plaza' | 'anti-ai'>('plaza')
 const activeCategory = ref<string | null>(null)
 const selectedNode = ref<PromptNode | null>(null)
 const showDetailModal = ref(false)
@@ -255,6 +306,14 @@ const importFileText = ref('')
 const stats = ref<PromptStats | null>(null)
 const categories = ref<PromptCategoryInfo[]>([])
 const allNodes = ref<PromptNode[]>([])
+
+watch(
+  () => props.seedStats,
+  (s) => {
+    if (s) stats.value = s
+  },
+  { immediate: true },
+)
 
 // 创建表单
 const createFormRef = ref()
@@ -310,22 +369,40 @@ const categoryOptions = computed(() =>
 async function loadData() {
   loading.value = true
   try {
-    const [statsRes, catsRes, nodesRes] = await Promise.all([
-      promptPlazaApi.getStats(),
-      promptPlazaApi.getCategoriesInfo(),
-      promptPlazaApi.listNodesByCategory(),
-    ])
-    stats.value = statsRes as unknown as PromptStats
-    categories.value = catsRes as unknown as PromptCategoryInfo[]
-    const nodesMap = nodesRes as unknown as Record<string, PromptNode[]>
+    // ★ 优化：单次聚合请求替代原来 3 次并发请求
+    const res = await promptPlazaApi.plazaInit() as unknown as PlazaInitResult
+
+    if (res.stats) stats.value = res.stats
+    categories.value = res.categories || []
+    const nodesMap = res.nodes_by_category || {}
     allNodes.value = Object.values(nodesMap).flat()
+
+    if (!res.stats && categories.value.length === 0 && allNodes.value.length === 0) {
+      message.error('加载提示词数据失败，请稍后重试')
+    }
   } catch (e) {
     console.error('加载提示词广场失败:', e)
-    message.error('加载提示词数据失败')
+    // 降级：回退到分散请求
+    try {
+      const [statsRes, catsRes, nodesRes] = await Promise.all([
+        promptPlazaApi.getStats().catch(() => null),
+        promptPlazaApi.getCategoriesInfo().catch(() => []),
+        promptPlazaApi.listNodesByCategory().catch(() => ({})),
+      ])
+      if (statsRes) stats.value = statsRes as unknown as PromptStats
+      categories.value = (catsRes as unknown as PromptCategoryInfo[]) || []
+      const nodesMap = (nodesRes as unknown as Record<string, PromptNode[]>) || {}
+      allNodes.value = Object.values(nodesMap).flat()
+      if (!statsRes && categories.value.length === 0 && allNodes.value.length === 0) {
+        message.error('加载提示词数据失败，请稍后重试')
+      }
+    } catch {
+      message.error('加载提示词数据失败')
+    }
   } finally {
     loading.value = false
   }
-  emit('refresh-stats')
+  emit('refresh-stats', stats.value)
 }
 
 function openDetail(node: PromptNode) {
@@ -443,7 +520,18 @@ onMounted(() => {
   loadData()
 })
 
-defineExpose({ loadData })
+// ★ 供外部联动调用：按 CPMS node_key 选中并打开提示词详情
+function selectNodeByKey(nodeKey: string) {
+  const node = allNodes.value.find(n => n.node_key === nodeKey)
+  if (node) {
+    openDetail(node)
+  } else {
+    // 未找到精确匹配，尝试搜索
+    searchQuery.value = nodeKey
+  }
+}
+
+defineExpose({ loadData, selectNodeByKey })
 </script>
 
 <style scoped>
@@ -501,6 +589,41 @@ defineExpose({ loadData })
   font-weight: 700;
   color: var(--app-text-primary);
   letter-spacing: 0.01em;
+}
+
+/* ---- 主标签切换 ---- */
+.main-tabs {
+  display: flex;
+  gap: 0;
+  padding: 10px 18px 0;
+  border-bottom: 2px solid var(--app-border);
+  flex-shrink: 0;
+}
+.main-tab {
+  font-size: 14px;
+  font-weight: 500;
+  padding: 10px 20px;
+  cursor: pointer;
+  color: var(--app-text-muted);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: all 0.2s ease;
+  user-select: none;
+}
+.main-tab:hover {
+  color: var(--app-text-primary);
+}
+.main-tab.is-active {
+  color: var(--color-brand);
+  border-bottom-color: var(--color-brand);
+  font-weight: 600;
+}
+
+.detail-panel-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
 }
 
 /* ---- 分类标签 ---- */

@@ -4,7 +4,15 @@
 整合宏观规划、幕级规划、AI 续规划
 """
 
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+import asyncio
+import json as _json
+import logging
+import time as _time
+
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
+
+logger = logging.getLogger(__name__)
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
 
@@ -13,6 +21,7 @@ from application.blueprint.services.continuous_planning_service import (
     MergeConflictException,
     get_macro_plan_progress,
     get_macro_plan_result,
+    get_act_chapters_llm_stream,
 )
 from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
 from infrastructure.persistence.database.chapter_element_repository import ChapterElementRepository
@@ -22,7 +31,54 @@ from application.paths import get_db_path
 from interfaces.api.dependencies import get_database
 
 
-router = APIRouter(prefix="/api/v1/planning", tags=["continuous-planning"])
+router = APIRouter(prefix="/planning", tags=["continuous-planning"])
+
+
+def _macro_sse_flat_node_payloads(parts: List[Dict]) -> List[Dict]:
+    """将 preview_parts 展平为与 SSE node 事件一致的载荷列表（深度优先：部→卷→幕）。"""
+    out: List[Dict] = []
+    for pi, part in enumerate(parts or []):
+        if not isinstance(part, dict):
+            continue
+        desc_p = part.get("description") or part.get("theme") or ""
+        out.append(
+            {
+                "type": "part",
+                "part_index": pi,
+                "title": str(part.get("title") or ""),
+                "description": desc_p if isinstance(desc_p, str) else str(desc_p),
+            }
+        )
+        for vi, vol in enumerate(part.get("volumes") or []):
+            if not isinstance(vol, dict):
+                continue
+            desc_v = vol.get("description") or vol.get("theme") or ""
+            out.append(
+                {
+                    "type": "volume",
+                    "part_index": pi,
+                    "volume_index": vi,
+                    "title": str(vol.get("title") or ""),
+                    "description": desc_v if isinstance(desc_v, str) else str(desc_v),
+                }
+            )
+            for ai, act in enumerate(vol.get("acts") or []):
+                if not isinstance(act, dict):
+                    continue
+                desc_a = act.get("description") or ""
+                out.append(
+                    {
+                        "type": "act",
+                        "part_index": pi,
+                        "volume_index": vi,
+                        "act_index": ai,
+                        "title": str(act.get("title") or ""),
+                        "description": desc_a if isinstance(desc_a, str) else str(desc_a),
+                    }
+                )
+    return out
+
+
 
 
 # ==================== DTOs ====================
@@ -86,6 +142,150 @@ def get_service() -> ContinuousPlanningService:
 
 # ==================== 宏观规划 API ====================
 
+@router.get("/novels/{novel_id}/macro/stream")
+async def stream_macro_plan_sse(
+    novel_id: str,
+    service: ContinuousPlanningService = Depends(get_service),
+):
+    """宏观规划 SSE 流式端点：LLM 生成阶段推送原始文本片段（chunk），完成后逐节点推送部→卷→幕。
+
+    事件格式（text/event-stream）：
+      event: status   data: {phase, message, current, total, percent}
+      event: chunk    data: {text}   # LLM 增量输出（原始文本）
+      event: node     data: {type, part_index, volume_index?, act_index?, title, description, estimated_chapters?}
+      event: done     data: {structure, quality_metrics, generation_time}
+      event: error    data: {message}
+    """
+
+    def _sse(event: str, data: dict) -> str:
+        return f"event: {event}\ndata: {_json.dumps(data, ensure_ascii=False)}\n\n"
+
+    async def _generate():
+        # ─── 读取 target_chapters ───────────────────────────────────
+        target_chapters = 100
+        try:
+            from application.paths import get_db_path
+            from infrastructure.persistence.database.connection import get_database
+            _db = get_database(get_db_path())
+            _row = _db.fetch_one(
+                "SELECT target_chapters FROM novels WHERE id = ?", (novel_id,)
+            )
+            if _row and _row["target_chapters"]:
+                target_chapters = int(_row["target_chapters"])
+        except Exception:
+            pass
+
+        yield _sse("status", {"phase": "start", "message": "正在初始化宏观规划…", "percent": 0})
+
+        service.initialize_macro_plan_task(novel_id)
+
+        task: asyncio.Task = asyncio.create_task(
+            service.generate_macro_plan(
+                novel_id=novel_id,
+                target_chapters=target_chapters,
+                structure_preference=None,
+            )
+        )
+
+        # ─── 轮询进度，直到 LLM 任务结束 ──────────────────────────
+        last_msg = ""
+        last_stream_len = 0
+        while not task.done():
+            await asyncio.sleep(0.4)
+            prog = get_macro_plan_progress(novel_id)
+            stream_full = prog.get("llm_stream_text") or ""
+            if len(stream_full) > last_stream_len:
+                delta = stream_full[last_stream_len:]
+                last_stream_len = len(stream_full)
+                if delta:
+                    yield _sse("chunk", {"text": delta})
+            msg = prog.get("message", "")
+            if msg and msg != last_msg:
+                last_msg = msg
+                yield _sse("status", {
+                    "phase": "generating",
+                    "message": msg,
+                    "current": prog.get("current", 0),
+                    "total": prog.get("total", 0),
+                    "percent": prog.get("percent", 0),
+                })
+
+        prog = get_macro_plan_progress(novel_id)
+        stream_full = prog.get("llm_stream_text") or ""
+        if len(stream_full) > last_stream_len:
+            tail = stream_full[last_stream_len:]
+            if tail:
+                yield _sse("chunk", {"text": tail})
+
+        if task.cancelled():
+            yield _sse("error", {"message": "规划已取消"})
+            return
+
+        exc = task.exception()
+        if exc:
+            yield _sse("error", {"message": f"生成失败：{exc}"})
+            return
+
+        result = task.result()
+        parts: list = result.get("structure", [])
+
+        # ─── 统计节点总数供前端显示进度 ───────────────────────────
+        total_nodes = sum(
+            1 + len(v.get("acts", [])) + 1
+            for p in parts
+            for v in p.get("volumes", [])
+        )
+        yield _sse("status", {
+            "phase": "streaming",
+            "message": "正在呈现叙事骨架…",
+            "percent": 95,
+            "total_nodes": total_nodes,
+        })
+
+        # ─── 逐节点推送（小延迟制造打字机效果） ───────────────────
+        for pi, part in enumerate(parts):
+            yield _sse("node", {
+                "type": "part",
+                "part_index": pi,
+                "title": part.get("title", ""),
+                "description": part.get("description", ""),
+            })
+            await asyncio.sleep(0.09)
+            for vi, vol in enumerate(part.get("volumes", [])):
+                yield _sse("node", {
+                    "type": "volume",
+                    "part_index": pi,
+                    "volume_index": vi,
+                    "title": vol.get("title", ""),
+                    "description": vol.get("description", ""),
+                })
+                await asyncio.sleep(0.06)
+                for ai, act in enumerate(vol.get("acts", [])):
+                    yield _sse("node", {
+                        "type": "act",
+                        "part_index": pi,
+                        "volume_index": vi,
+                        "act_index": ai,
+                        "title": act.get("title", ""),
+                        "description": act.get("description", ""),
+                        "estimated_chapters": act.get("estimated_chapters", 0),
+                        "narrative_goal": act.get("narrative_goal", ""),
+                    })
+                    await asyncio.sleep(0.04)
+
+        yield _sse("done", {
+            "structure": parts,
+            "quality_metrics": result.get("quality_metrics", {}),
+            "generation_time": result.get("generation_time", 0),
+        })
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.post("/novels/{novel_id}/macro/generate", status_code=202)
 async def generate_macro_plan(
     novel_id: str,
@@ -142,6 +342,173 @@ async def get_macro_plan_generation_progress(novel_id: str):
     }
 
 
+@router.get("/novels/{novel_id}/macro/progress/stream")
+async def watch_macro_plan_progress_sse(novel_id: str):
+    """旁观宏观规划内存进度（不启动 LLM）。
+
+    用于全托管守护进程已在进程内调用 ``generate_macro_plan`` 的场景：前端通过本 SSE
+    订阅 ``llm_stream_text`` 增量与状态，无需点击「刷新」即可确认模型在输出。
+
+    事件：
+      event: status    data: {phase, status, message, current, total, percent}
+      event: chunk      data: {text}   # LLM 增量（重连时从 last_len=0 重放当前缓冲全文）
+      event: node      data: 部/卷/幕 节点（running 时随增量解析推送；completed 时补齐剩余）
+      event: done       data: {success}  # 节点序列结束，随后仍会发 terminal
+      event: heartbeat data: {tick}
+      event: terminal   data: {status, message}  # status 为 completed | failed | timeout
+    """
+
+    def _sse(event: str, data: dict) -> str:
+        return f"event: {event}\ndata: {_json.dumps(data, ensure_ascii=False)}\n\n"
+
+    async def _watch():
+        t0 = _time.monotonic()
+        last_len = 0
+        last_sig: tuple[str, str] | None = None
+        tick = 0
+        max_seconds = 3600.0
+        chunk_events = 0
+        emitted_macro_nodes = 0
+
+        logger.info("[MacroSSEWatch] novel=%s client subscribed macro/progress/stream", novel_id)
+
+        while True:
+            if _time.monotonic() - t0 > max_seconds:
+                logger.warning("[MacroSSEWatch] novel=%s stream timeout after %.0fs", novel_id, max_seconds)
+                yield _sse("terminal", {"status": "timeout", "message": "宏观规划观摩流超时"})
+                break
+
+            await asyncio.sleep(0.32)
+            prog = get_macro_plan_progress(novel_id)
+            stream_full = prog.get("llm_stream_text") or ""
+            st = prog.get("status") or "idle"
+            msg = prog.get("message") or ""
+
+            sig = (st, msg)
+            if sig != last_sig:
+                last_sig = sig
+                logger.debug(
+                    "[MacroSSEWatch] novel=%s progress status=%s message=%s",
+                    novel_id,
+                    st,
+                    (msg[:120] + "…") if len(msg) > 120 else msg,
+                )
+                yield _sse(
+                    "status",
+                    {
+                        "phase": st if st != "idle" else "watch",
+                        "status": st,
+                        "message": msg or ("已连接宏观规划输出流，等待模型生成…" if st == "idle" else ""),
+                        "current": prog.get("current", 0),
+                        "total": prog.get("total", 0),
+                        "percent": prog.get("percent", 0),
+                    },
+                )
+
+            if len(stream_full) > last_len:
+                delta = stream_full[last_len:]
+                last_len = len(stream_full)
+                if delta:
+                    chunk_events += 1
+                    yield _sse("chunk", {"text": delta})
+                    if chunk_events == 1 or chunk_events % 25 == 0:
+                        logger.debug(
+                            "[MacroSSEWatch] novel=%s sse_chunk #%d delta_chars=%d llm_buffer_chars=%d",
+                            novel_id,
+                            chunk_events,
+                            len(delta),
+                            last_len,
+                        )
+
+            parts_snap = prog.get("preview_parts")
+            if isinstance(parts_snap, list) and parts_snap:
+                payloads = _macro_sse_flat_node_payloads(parts_snap)
+                while emitted_macro_nodes < len(payloads):
+                    pl = payloads[emitted_macro_nodes]
+                    body: Dict = {
+                        "type": pl["type"],
+                        "part_index": pl["part_index"],
+                        "title": pl["title"],
+                        "description": pl["description"],
+                    }
+                    if pl["type"] != "part":
+                        body["volume_index"] = pl["volume_index"]
+                    if pl["type"] == "act":
+                        body["act_index"] = pl["act_index"]
+                    yield _sse("node", body)
+                    emitted_macro_nodes += 1
+                    await asyncio.sleep(0.028)
+
+            tick += 1
+            if tick % 10 == 0:
+                yield _sse("heartbeat", {"tick": tick})
+                logger.debug(
+                    "[MacroSSEWatch] novel=%s heartbeat tick=%d stream_status=%s llm_buffer_chars=%d",
+                    novel_id,
+                    tick,
+                    st,
+                    len(stream_full),
+                )
+
+            if st in ("completed", "failed"):
+                if len(stream_full) > last_len:
+                    tail = stream_full[last_len:]
+                    last_len = len(stream_full)
+                    if tail:
+                        chunk_events += 1
+                        yield _sse("chunk", {"text": tail})
+                        logger.debug(
+                            "[MacroSSEWatch] novel=%s tail_chunk delta_chars=%d llm_buffer_chars=%d",
+                            novel_id,
+                            len(tail),
+                            last_len,
+                        )
+                if st == "completed":
+                    parts = prog.get("preview_parts") or []
+                    np = len(parts)
+                    nv = sum(len(p.get("volumes") or []) for p in parts)
+                    na = sum(
+                        len(v.get("acts") or [])
+                        for p in parts
+                        for v in (p.get("volumes") or [])
+                    )
+                    logger.info(
+                        "[MacroSSEWatch] novel=%s completed → emitting nodes parts=%d volumes=%d acts=%d sse_chunks=%d",
+                        novel_id,
+                        np,
+                        nv,
+                        na,
+                        chunk_events,
+                    )
+                    yield _sse(
+                        "status",
+                        {
+                            "phase": "streaming",
+                            "status": st,
+                            "message": "正在呈现叙事骨架…",
+                            "current": prog.get("current", 0),
+                            "total": prog.get("total", 0),
+                            "percent": prog.get("percent", 0),
+                        },
+                    )
+                    yield _sse("done", {"success": True})
+                    logger.debug("[MacroSSEWatch] novel=%s emitted done event", novel_id)
+                logger.info(
+                    "[MacroSSEWatch] novel=%s terminal status=%s message=%s",
+                    novel_id,
+                    st,
+                    (msg[:160] + "…") if len(msg) > 160 else msg,
+                )
+                yield _sse("terminal", {"status": st, "message": msg})
+                break
+
+    return StreamingResponse(
+        _watch(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.get("/novels/{novel_id}/macro/result")
 async def get_macro_plan_generation_result(novel_id: str):
     """获取精密结构规划生成结果。"""
@@ -187,6 +554,134 @@ async def confirm_macro_plan(
 
 
 # ==================== 幕级规划 API ====================
+
+@router.get("/acts/{act_id}/chapters/stream")
+async def stream_act_chapters_sse(
+    act_id: str,
+    chapter_count: Optional[int] = Query(
+        None, ge=2, le=20, description="本幕规划章节数；不传则与 POST 生成接口一致，由幕节点或引擎推荐"
+    ),
+    service: ContinuousPlanningService = Depends(get_service),
+):
+    """幕级章节规划 SSE：LLM 生成阶段推送原始文本 chunk；完成后逐章骨架再 done。
+
+    事件格式（text/event-stream）：
+      event: status   data: {phase, message, percent?, expected_chapters?}
+      event: chunk    data: {text}   # LLM 增量输出
+      event: chapter  data: {index, title, outline?, ...}
+      event: done     data: {success, act_id, chapters}
+      event: error    data: {message}
+    """
+
+    def _sse(event: str, data: dict) -> str:
+        return f"event: {event}\ndata: {_json.dumps(data, ensure_ascii=False)}\n\n"
+
+    async def _generate():
+        try:
+            expected = await service.resolve_act_planning_chapter_count(
+                act_id, chapter_count
+            )
+        except ValueError as e:
+            yield _sse("error", {"message": str(e)})
+            return
+
+        yield _sse(
+            "status",
+            {
+                "phase": "start",
+                "message": "正在初始化本幕章节规划…",
+                "percent": 0,
+                "expected_chapters": expected,
+            },
+        )
+
+        task: asyncio.Task = asyncio.create_task(
+            service.plan_act_chapters(
+                act_id=act_id, custom_chapter_count=chapter_count
+            )
+        )
+
+        tick = 0
+        last_stream_len = 0
+        while not task.done():
+            await asyncio.sleep(0.4)
+            tick += 1
+            stream_full = get_act_chapters_llm_stream(act_id)
+            if len(stream_full) > last_stream_len:
+                delta = stream_full[last_stream_len:]
+                last_stream_len = len(stream_full)
+                if delta:
+                    yield _sse("chunk", {"text": delta})
+            yield _sse(
+                "status",
+                {
+                    "phase": "generating",
+                    "message": "正在生成本幕章节大纲（调用 AI）…",
+                    "expected_chapters": expected,
+                    "percent": min(8 + (tick % 10) * 3, 88),
+                },
+            )
+
+        stream_full = get_act_chapters_llm_stream(act_id)
+        if len(stream_full) > last_stream_len:
+            tail = stream_full[last_stream_len:]
+            if tail:
+                yield _sse("chunk", {"text": tail})
+
+        if task.cancelled():
+            yield _sse("error", {"message": "规划已取消"})
+            return
+
+        exc = task.exception()
+        if exc:
+            yield _sse("error", {"message": f"生成失败：{exc}"})
+            return
+
+        result = task.result()
+        if not result.get("success"):
+            msg = (
+                result.get("error")
+                or result.get("parse_error")
+                or "幕级规划失败"
+            )
+            yield _sse("error", {"message": str(msg)})
+            return
+
+        chapters = result.get("chapters") or []
+        if not isinstance(chapters, list):
+            chapters = []
+
+        yield _sse(
+            "status",
+            {
+                "phase": "streaming",
+                "message": "正在呈现章节骨架…",
+                "percent": 94,
+                "expected_chapters": len(chapters) or expected,
+            },
+        )
+
+        for i, ch in enumerate(chapters):
+            row = ch if isinstance(ch, dict) else {}
+            payload = {"index": i, **row}
+            yield _sse("chapter", payload)
+            await asyncio.sleep(0.045)
+
+        yield _sse(
+            "done",
+            {
+                "success": True,
+                "act_id": result.get("act_id", act_id),
+                "chapters": chapters,
+            },
+        )
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
 
 @router.post("/acts/{act_id}/chapters/generate")
 async def generate_act_chapters(
