@@ -169,3 +169,4 @@ drafts/
 # ── 运行时数据目录（整体忽略） ──
 data/
 !data/.gitkeep
+.agents
