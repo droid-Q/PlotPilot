@@ -26,6 +26,16 @@ use backend::BackendManager;
 /// 防止重复 spawn 多条优雅退出线程（用户连点关闭）
 static GRACEFUL_SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
 
+fn shutdown_backend_and_exit(app_handle: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let backend = app_handle.state::<Mutex<BackendManager>>();
+        if let Ok(mgr) = backend.lock() {
+            mgr.graceful_shutdown(Duration::from_secs(6));
+        }
+        app_handle.exit(0);
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 初始化日志
@@ -54,15 +64,7 @@ pub fn run() {
                 // 最小化窗口给用户反馈（关闭正在进行）
                 let _ = window.minimize();
 
-                let app_handle = window.app_handle().clone();
-                std::thread::spawn(move || {
-                    let backend = app_handle.state::<Mutex<BackendManager>>();
-                    if let Ok(mgr) = backend.lock() {
-                        // 减少超时时间，快速关闭
-                        mgr.graceful_shutdown(Duration::from_secs(3));
-                    }
-                    app_handle.exit(0);
-                });
+                shutdown_backend_and_exit(window.app_handle().clone());
             }
         })
         .setup(|app| {
@@ -110,6 +112,16 @@ pub fn run() {
             commands::check_environment,
             commands::extract_embedded_python,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running PlotPilot");
+        .build(tauri::generate_context!())
+        .expect("error while building PlotPilot")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                if code.is_none() {
+                    api.prevent_exit();
+                    if !GRACEFUL_SHUTDOWN_STARTED.swap(true, Ordering::SeqCst) {
+                        shutdown_backend_and_exit(app_handle.clone());
+                    }
+                }
+            }
+        });
 }

@@ -2,6 +2,8 @@
 
 提供 RESTful API 接口。
 """
+from __future__ import annotations
+
 # 必须在任何 HuggingFace/Transformers 导入前设置离线模式
 import os
 os.environ['HF_HUB_OFFLINE'] = '1'
@@ -233,6 +235,7 @@ def _run_backend_shutdown_hooks() -> None:
     """与 shutdown 生命周期钩子共用：守护进程停止 + DB 连接关闭 + WAL + 日志。"""
     _start_force_exit_watchdog()  # 启动看门狗，防止关闭流程卡死
     _stop_autopilot_daemon_thread()
+    _shutdown_mp_manager()
     # 关闭所有数据库连接（跳过 WAL checkpoint，避免锁等待卡死）
     try:
         from infrastructure.persistence.database.connection import get_database
@@ -288,6 +291,7 @@ def _internal_shutdown_after_response() -> None:
         # os._exit(0) 不会触发 Python 的正常清理流程，
         # multiprocessing.Process 的 daemon 子进程可能变成孤儿
         _stop_autopilot_daemon_thread()
+        _shutdown_mp_manager()
         # 关闭数据库连接（跳过 checkpoint，避免锁等待卡死）
         try:
             from infrastructure.persistence.database.connection import get_database
@@ -314,6 +318,55 @@ async def internal_shutdown(request: Request):
     threading.Thread(target=_internal_shutdown_after_response, daemon=True).start()
     return {"ok": True, "message": "shutting down"}
 
+
+def _is_process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _start_desktop_parent_watchdog() -> None:
+    """桌面端父进程消失时自清理，兜住 macOS 系统 Quit/强退绕过 Rust 退出钩子的情况。"""
+    raw = os.getenv("PLOTPILOT_PARENT_PID", "").strip()
+    if not raw:
+        return
+    try:
+        parent_pid = int(raw)
+    except ValueError:
+        logger.warning("忽略非法 PLOTPILOT_PARENT_PID=%r", raw)
+        return
+    if parent_pid <= 1:
+        return
+
+    def _watch() -> None:
+        while True:
+            time.sleep(0.5)
+            if os.getppid() == 1 or not _is_process_alive(parent_pid):
+                logger.warning("检测到桌面父进程 PID=%s 已退出，后端开始自清理", parent_pid)
+                try:
+                    _run_backend_shutdown_hooks()
+                except Exception as e:
+                    logger.error("父进程退出后的后端自清理失败: %s", e)
+                finally:
+                    if os.name != "nt" and os.getpgrp() == os.getpid():
+                        try:
+                            pgid = os.getpgrp()
+                            logger.warning("正在终止后端进程组 PGID=%s", pgid)
+                            logging.shutdown()
+                            os.killpg(pgid, signal.SIGTERM)
+                            time.sleep(0.25)
+                            os.killpg(pgid, signal.SIGKILL)
+                        except Exception:
+                            pass
+                    logging.shutdown()
+                    os._exit(0)
+
+    threading.Thread(target=_watch, name="desktop-parent-watchdog", daemon=True).start()
+    logger.info("✅ 桌面父进程看门狗已启动 (parent_pid=%s)", parent_pid)
+
+
 # 守护进程进程管理（使用独立进程避免阻塞主事件循环）
 _daemon_process = None
 _daemon_stop_event = None
@@ -322,6 +375,24 @@ _daemon_stop_event = None
 # 在启动守护进程前初始化，供 API 进程零 DB IO 读取实时状态
 _mp_manager: multiprocessing.Manager | None = None
 _shared_state: dict | None = None
+
+
+def _shutdown_mp_manager() -> None:
+    """关闭 multiprocessing.Manager，避免桌面端退出后留下 SyncManager 子进程。"""
+    global _mp_manager, _shared_state
+    manager = _mp_manager
+    _shared_state = None
+    _mp_manager = None
+    if manager is None:
+        return
+    try:
+        manager.shutdown()
+        logger.info("✅ 跨进程共享状态 Manager 已关闭")
+    except Exception as e:
+        logger.warning("关闭跨进程共享状态 Manager 失败: %s", e)
+
+
+_start_desktop_parent_watchdog()
 
 
 def _get_shared_state() -> dict:

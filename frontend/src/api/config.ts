@@ -20,7 +20,14 @@ function isTauri(): boolean {
         __TAURI__?: unknown
         __TAURI_INTERNALS__?: unknown
       }
-      _isTauri = !!(w.__TAURI__ || w.__TAURI_INTERNALS__)
+      const protocol = window.location?.protocol
+      const hostname = window.location?.hostname
+      _isTauri = !!(
+        w.__TAURI__ ||
+        w.__TAURI_INTERNALS__ ||
+        protocol === 'tauri:' ||
+        hostname === 'tauri.localhost'
+      )
     }
   }
   return _isTauri
@@ -127,6 +134,28 @@ async function waitForTauriBackendPort(
   return null
 }
 
+async function waitForHttpHealth(port: number, maxWaitMs: number, intervalMs: number): Promise<boolean> {
+  const deadline = Date.now() + maxWaitMs
+  while (Date.now() < deadline) {
+    try {
+      const healthCheck = await fetch(`http://127.0.0.1:${port}/health`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(1500),
+      })
+      if (healthCheck.ok) {
+        return true
+      }
+      console.warn('[API] 后端健康检查失败，状态码:', healthCheck.status)
+    } catch (e) {
+      console.warn('[API] 后端健康检查异常:', e)
+    }
+    await new Promise<void>(resolve => {
+      setTimeout(resolve, intervalMs)
+    })
+  }
+  return false
+}
+
 /**
  * 初始化 API（应用启动时调用一次）
  */
@@ -154,21 +183,17 @@ export async function initApiClient(): Promise<void> {
     axiosInstance.defaults.baseURL = newBaseURL
     console.log(`[API] 桌面模式 baseURL: ${newBaseURL}`)
 
-    // 验证后端是否真的响应
-    try {
-      const healthCheck = await fetch(`http://127.0.0.1:${port}/health`, {
-        method: 'GET',
-        signal: AbortSignal.timeout(5000)
-      })
-      if (!healthCheck.ok) {
-        console.warn('[API] 后端健康检查失败，状态码:', healthCheck.status)
-      }
-    } catch (e) {
-      console.warn('[API] 后端健康检查异常:', e)
+    const ready = await waitForHttpHealth(port, TAURI_BACKEND_WAIT_MS, TAURI_BACKEND_POLL_MS)
+    if (!ready) {
+      console.warn('[API] 后端健康检查等待超时，继续挂载前端')
     }
   } else if (isTauri()) {
     axiosInstance.defaults.baseURL = 'http://127.0.0.1:8005/api/v1'
     console.warn('[API] Tauri 下未能通过 IPC 取得端口，回退 8005')
+    const ready = await waitForHttpHealth(8005, TAURI_BACKEND_WAIT_MS, TAURI_BACKEND_POLL_MS)
+    if (!ready) {
+      console.warn('[API] 后端健康检查等待超时，继续挂载前端')
+    }
   }
 
   syncLegacyRootsFromV1()

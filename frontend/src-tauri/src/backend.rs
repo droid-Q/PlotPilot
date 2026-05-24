@@ -16,6 +16,8 @@ use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Manager};
 use ureq::Agent;
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as UnixCommandExt;
 #[cfg(target_os = "windows")]
 use std::os::windows::io::AsRawHandle;
 #[cfg(target_os = "windows")]
@@ -41,6 +43,29 @@ fn spawn_stdio_drainers(mut child: Child) -> Child {
         });
     }
     child
+}
+
+#[cfg(unix)]
+fn send_signal_to_process_group(pid: u32, signal: &str) {
+    let pgid = format!("-{}", pid);
+    match Command::new("kill").args([signal, &pgid]).status() {
+        Ok(status) if status.success() => {
+            log::info!("已向后端进程组 {} 发送 {}", pgid, signal);
+        }
+        Ok(status) => {
+            log::debug!("向后端进程组 {} 发送 {} 返回: {}", pgid, signal, status);
+        }
+        Err(e) => {
+            log::debug!("向后端进程组 {} 发送 {} 失败: {}", pgid, signal, e);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn terminate_process_group(pid: u32) {
+    send_signal_to_process_group(pid, "-TERM");
+    thread::sleep(Duration::from_millis(250));
+    send_signal_to_process_group(pid, "-KILL");
 }
 
 /// 后端管理器
@@ -375,6 +400,10 @@ impl BackendManager {
                 .env("HF_DATASETS_OFFLINE", "1")
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            #[cfg(unix)]
+            {
+                c.process_group(0);
+            }
             #[cfg(target_os = "windows")]
             {
                 c.creation_flags(windows_subsystem_flag());
@@ -403,6 +432,10 @@ impl BackendManager {
                 .env("HF_DATASETS_OFFLINE", "1")
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            #[cfg(unix)]
+            {
+                c.process_group(0);
+            }
             #[cfg(target_os = "windows")]
             {
                 c.creation_flags(windows_subsystem_flag());
@@ -411,6 +444,7 @@ impl BackendManager {
         };
 
         Self::inject_prod_data_env(&mut cmd, &self._app_handle)?;
+        cmd.env("PLOTPILOT_PARENT_PID", std::process::id().to_string());
 
         let child = cmd
             .spawn()
@@ -637,8 +671,11 @@ impl BackendManager {
                     }
                     Some(child) => match child.try_wait() {
                         Ok(Some(status)) => {
+                            let pid = child.id();
                             log::info!("✅ 后端已退出: {:?}", status);
                             guard.take();
+                            #[cfg(unix)]
+                            terminate_process_group(pid);
                             return;
                         }
                         Ok(None) => {}
@@ -694,7 +731,10 @@ impl BackendManager {
 
         let mut guard = self.child.lock().unwrap();
         if let Some(mut child) = guard.take() {
+            let pid = child.id();
             log::info!("🛑 正在强杀后端进程...");
+            #[cfg(unix)]
+            terminate_process_group(pid);
             let _ = child.kill();
             let _ = child.wait();
             log::info!("✅ 后端进程已终止");

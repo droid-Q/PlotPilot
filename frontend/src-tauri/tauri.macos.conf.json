@@ -7,8 +7,10 @@
     "resources": {
       "../../application/": "application/",
       "../../domain/": "domain/",
+      "../../engine/": "engine/",
       "../../infrastructure/": "infrastructure/",
       "../../interfaces/": "interfaces/",
+      "../../shared/": "shared/",
       "../../scripts/start_daemon.py": "scripts/start_daemon.py",
       "../../scripts/start_mac.sh": "scripts/start_mac.sh",
       "../../load_env.py": "load_env.py",
